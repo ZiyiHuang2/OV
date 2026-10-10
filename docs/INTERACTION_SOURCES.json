@@ -1,0 +1,112 @@
+{
+  "review_date": "2026-10-10",
+  "base_commit": "cb3fc41dd342d5c1afdd2507c818d48901a8a5b2",
+  "notes": "Official source reading; independent mechanism adaptations, not paper reproductions. No external implementation copied wholesale.",
+  "sources": [
+    {
+      "method": "LSKNet",
+      "venue": "ICCV 2023 / IJCV 2024",
+      "repository": "https://github.com/zcablii/LSKNet",
+      "commit": "4671650cb38830370d63df81078338c2a3b8eb58",
+      "path": "mmrotate/models/backbones/lsknet.py",
+      "symbols_read": [
+        "LSKblock",
+        "Attention",
+        "Block"
+      ],
+      "url": "https://github.com/zcablii/LSKNet/blob/4671650cb38830370d63df81078338c2a3b8eb58/mmrotate/models/backbones/lsknet.py",
+      "original_training_run": false
+    },
+    {
+      "method": "SegNeXt",
+      "venue": "NeurIPS 2022",
+      "repository": "https://github.com/Visual-Attention-Network/SegNeXt",
+      "commit": "c87bcaef22ed2ad72ed3decb3727e5f879343516",
+      "path": "mmseg/models/backbones/mscan.py",
+      "symbols_read": [
+        "AttentionModule",
+        "Block"
+      ],
+      "url": "https://github.com/Visual-Attention-Network/SegNeXt/blob/c87bcaef22ed2ad72ed3decb3727e5f879343516/mmseg/models/backbones/mscan.py",
+      "original_training_run": false
+    },
+    {
+      "method": "Mask2Former",
+      "venue": "CVPR 2022",
+      "repository": "https://github.com/facebookresearch/Mask2Former",
+      "commit": "9b0651c6c1d5b3af2e6da0589b719c514ec0d69a",
+      "path": "mask2former/modeling/transformer_decoder/mask2former_transformer_decoder.py",
+      "symbols_read": [
+        "MultiScaleMaskedTransformerDecoder.forward",
+        "forward_prediction_heads"
+      ],
+      "url": "https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former/modeling/transformer_decoder/mask2former_transformer_decoder.py",
+      "original_training_run": false
+    },
+    {
+      "method": "Restormer",
+      "venue": "CVPR 2022",
+      "repository": "https://github.com/swz30/Restormer",
+      "commit": "68dc6ac472db26f16361150cb7a96a1bc87da93f",
+      "path": "basicsr/models/archs/restormer_arch.py",
+      "symbols_read": [
+        "FeedForward",
+        "Attention"
+      ],
+      "url": "https://github.com/swz30/Restormer/blob/68dc6ac472db26f16361150cb7a96a1bc87da93f/basicsr/models/archs/restormer_arch.py",
+      "original_training_run": false
+    },
+    {
+      "method": "SAPA",
+      "venue": "NeurIPS 2022",
+      "repository": "https://github.com/poppinace/sapa",
+      "commit": "5530ef8b727f1a06d68c9066f6bda8d7da8c1d5d",
+      "path": "SAPA.py",
+      "symbols_read": [
+        "SAPA"
+      ],
+      "url": "https://github.com/poppinace/sapa/blob/5530ef8b727f1a06d68c9066f6bda8d7da8c1d5d/SAPA.py",
+      "original_training_run": false
+    },
+    {
+      "method": "FADE",
+      "venue": "ECCV 2022 / IJCV 2024",
+      "repository": "https://github.com/poppinace/fade",
+      "commit": "e4de4dbc85304d659807656fc909207282b1bc25",
+      "path": "pytorch_implementation/FADE_L2H.py",
+      "symbols_read": [
+        "SemiShift",
+        "FADE",
+        "FADELite"
+      ],
+      "url": "https://github.com/poppinace/fade/blob/e4de4dbc85304d659807656fc909207282b1bc25/pytorch_implementation/FADE_L2H.py",
+      "original_training_run": false
+    },
+    {
+      "method": "FreqFusion",
+      "venue": "TPAMI",
+      "repository": "https://github.com/Linwei-Chen/FreqFusion",
+      "commit": "3fb0c70637a3c194fb74294d3ce4681958b26241",
+      "path": "FreqFusion.py",
+      "symbols_read": [
+        "FreqFusion",
+        "LocalSimGuidedSampler"
+      ],
+      "url": "https://github.com/Linwei-Chen/FreqFusion/blob/3fb0c70637a3c194fb74294d3ce4681958b26241/FreqFusion.py",
+      "original_training_run": false
+    },
+    {
+      "method": "UniRepLKNet",
+      "venue": "CVPR 2024 / TPAMI 2025",
+      "repository": "https://github.com/AILab-CVC/UniRepLKNet",
+      "commit": "b5677d8fb0e7b8af61eac39c1bf02727f5afc1d5",
+      "path": "unireplknet.py",
+      "symbols_read": [
+        "DilatedReparamBlock",
+        "UniRepLKNetBlock"
+      ],
+      "url": "https://github.com/AILab-CVC/UniRepLKNet/blob/b5677d8fb0e7b8af61eac39c1bf02727f5afc1d5/unireplknet.py",
+      "original_training_run": false
+    }
+  ]
+}

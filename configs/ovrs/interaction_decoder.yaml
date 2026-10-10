@@ -1,0 +1,6 @@
+_BASE_: base.yaml
+MODEL:
+  OVRS:
+    CAD_STAGES: [1]
+    CAD_SCOPE: per_class
+    CAD_MODE: affinity

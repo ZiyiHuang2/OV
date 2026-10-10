@@ -26,7 +26,7 @@ def model_config(cfg):
         'INPUT.FORMAT',
         'MODEL.OVRS.AGGREGATION', 'MODEL.OVRS.CONTEXT_ADAPTER', 'MODEL.OVRS.CAD_STAGES',
     )
-    if cfg.MODEL.OVRS.CONTEXT_ADAPTER == 'lsk':
+    if cfg.MODEL.OVRS.CONTEXT_ADAPTER in {'lsk', 'cost_lsk'}:
         keys += ('MODEL.OVRS.LSK_DILATION',)
     if cfg.MODEL.OVRS.AGGREGATION == 'parallel_epl':
         keys += ('MODEL.OVRS.EPL_EXPERTS',)
@@ -37,6 +37,8 @@ def model_config(cfg):
         keys += ('MODEL.OVRS.CAD_POOLING',)
         if cfg.MODEL.OVRS.CAD_SCOPE != 'shared':
             keys += ('MODEL.OVRS.CAD_SCOPE',)
+        if cfg.MODEL.OVRS.CAD_MODE != 'residual':
+            keys += ('MODEL.OVRS.CAD_MODE',)
     result = {}
     for key in keys:
         value = cfg

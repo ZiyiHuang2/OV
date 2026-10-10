@@ -24,7 +24,8 @@ ROOT = Path(__file__).resolve().parent
 EXPERIMENTS = ('baseline', 'parallel_simple', 'parallel_epl', 'lsk', 'conv',
                'cad', 'epl_lsk', 'epl_cad', 'full', 'full_cad_both',
                'parallel_gated', 'cad_weighted', 'full_selective',
-               'full_epl_uniform', 'full_class_cad', 'full_uniform_class_cad')
+               'full_epl_uniform', 'full_class_cad', 'full_uniform_class_cad',
+               'interaction_guidance', 'interaction_fusion', 'interaction_decoder', 'full_interaction')
 
 
 def harmonic_iou(seen, unseen):
