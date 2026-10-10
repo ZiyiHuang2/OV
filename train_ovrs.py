@@ -16,7 +16,7 @@ from detectron2.utils import comm
 
 from cat_seg import add_cat_seg_config
 from cat_seg.data.datasets.register_rs import register_rs_manifest
-from train_net import Trainer
+from cat_seg.engine import Trainer
 
 ROOT = Path(__file__).resolve().parent
 EXPERIMENTS = ('baseline', 'parallel_simple', 'parallel_epl', 'lsk', 'conv',
@@ -110,7 +110,7 @@ def setup(args):
         provenance = {
             'dataset_manifest': str(Path(args.dataset_manifest).resolve()),
             'experiment': args.experiment, 'weights': cfg.MODEL.WEIGHTS,
-            'source': json.loads((ROOT / 'UPSTREAM.json').read_text()),
+            'source': json.loads((ROOT / 'docs' / 'UPSTREAM.json').read_text()),
             'torch': torch.__version__, 'cuda': torch.version.cuda,
             'seed': cfg.SEED, 'ovrs': dict(cfg.MODEL.OVRS),
         }

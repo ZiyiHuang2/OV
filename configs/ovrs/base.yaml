@@ -1,4 +1,4 @@
-_BASE_: ../vitb_384.yaml
+_BASE_: ../base/clip_vitb16.yaml
 MODEL:
   WEIGHTS: ""
 SOLVER:

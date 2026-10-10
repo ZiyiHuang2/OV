@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from cat_seg.modeling.transformer.model import Aggregator, AggregatorLayer
-from cat_seg.modeling.transformer.ovrs_modules import CostGuidanceRefiner, LSKGuidanceAdapter, ParallelFusion
+from cat_seg.modeling.modules import CostGuidanceRefiner, LSKGuidanceAdapter, ParallelFusion
 from cat_seg.modeling.losses import masked_segmentation_bce
 
 

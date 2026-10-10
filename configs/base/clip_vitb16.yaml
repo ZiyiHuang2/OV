@@ -1,4 +1,4 @@
-_BASE_: config.yaml
+_BASE_: catseg.yaml
 MODEL:
   META_ARCHITECTURE: "CATSeg"
   PIXEL_MEAN: [123.675, 116.280, 103.530]

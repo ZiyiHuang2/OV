@@ -35,7 +35,7 @@ Note that the demos are still running on our previous version, and will be updat
 - [ ] Demo update
 
 ## Installation
-Please follow [installation](INSTALL.md).
+Please follow [installation](../docs/INSTALL.md).
 
 ## Data Preparation
 Please follow [dataset preperation](datasets/README.md).
@@ -53,9 +53,9 @@ To train or evaluate the model in different environments, modify the given shell
 sh run.sh [CONFIG] [NUM_GPUS] [OUTPUT_DIR] [OPTS]
 
 # For ViT-B variant
-sh run.sh configs/vitb_384.yaml 4 output/
+sh legacy/run.sh configs/base/clip_vitb16.yaml 4 output/
 # For ViT-L variant
-sh run.sh configs/vitl_336.yaml 4 output/
+sh legacy/run.sh legacy/configs/vitl_336.yaml 4 output/
 ```
 
 ## Evaluation
@@ -66,7 +66,7 @@ To individually run the model in different datasets, please refer to the command
 ```bash
 sh run.sh [CONFIG] [NUM_GPUS] [OUTPUT_DIR] [OPTS]
 
-sh eval.sh configs/vitl_336.yaml 4 output/ MODEL.WEIGHTS path/to/weights.pth
+sh legacy/eval.sh legacy/configs/vitl_336.yaml 4 output/ MODEL.WEIGHTS path/to/weights.pth
 ```
 
 ## Pretrained Models

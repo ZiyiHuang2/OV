@@ -67,3 +67,20 @@ by evaluation on two images with three test classes. The saved selective
 checkpoint was reloaded for evaluation. The previous full-model checkpoint
 was also loaded strictly and evaluated successfully. Synthetic accuracy
 is not reported as evidence of improved segmentation.
+
+## Repository organization validation
+
+After separating the three modules and moving the shared Trainer into the
+package, all 50 tests passed again. All 13 experiment configurations resolve
+the relocated base YAMLs. The main and archived Trainer CLI help commands,
+Python compilation, shell syntax and the active documentation links passed.
+
+With the same seed, the baseline, `full` and `full_selective` aggregators have
+exactly the same parameter keys, initialized tensors and forward outputs as
+the pre-organization code (`max_output_error=0.0`). Both full-sized 17-class
+aggregators passed CPU forward/backward again with unchanged parameter counts.
+The previously saved complete selective CLIP checkpoint was loaded strictly
+and evaluated on the two synthetic validation images through the reorganized
+entry point. No architecture or training-objective changes were made in this
+organization pass. Archived demos and natural-image preparation scripts were
+compiled, but were not exercised with their original data/dependencies.

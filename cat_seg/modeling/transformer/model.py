@@ -12,7 +12,7 @@ from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 
 from timm.layers import PatchEmbed, Mlp, DropPath, to_2tuple, to_ntuple, trunc_normal_, _assert
-from .ovrs_modules import (
+from ..modules import (
     LSKGuidanceAdapter, ConvGuidanceAdapter, ParallelFusion, CostGuidanceRefiner,
 )
 

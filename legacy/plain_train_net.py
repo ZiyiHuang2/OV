@@ -4,6 +4,10 @@ MaskFormer Training Script.
 
 This script is a simplified version of the training script in detectron2/tools.
 """
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import copy
 import itertools
 import logging

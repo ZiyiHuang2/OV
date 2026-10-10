@@ -26,7 +26,7 @@ shift 3
 opts=${@}
 
 #ADE20k-150
-python train_net.py --config $config \
+python legacy/train_net.py --config $config \
  --num-gpus $gpus \
  --dist-url "auto" \
  --eval-only \
@@ -39,7 +39,7 @@ python train_net.py --config $config \
  $opts
 
 #ADE20k-847
-python train_net.py --config $config \
+python legacy/train_net.py --config $config \
  --num-gpus $gpus \
  --dist-url "auto" \
  --eval-only \
@@ -52,7 +52,7 @@ python train_net.py --config $config \
  $opts
 
 #Pascal VOC
-python train_net.py --config $config \
+python legacy/train_net.py --config $config \
  --num-gpus $gpus \
  --dist-url "auto" \
  --eval-only \
@@ -65,7 +65,7 @@ python train_net.py --config $config \
  $opts
 
 #Pascal VOC-b
-python train_net.py --config $config \
+python legacy/train_net.py --config $config \
  --num-gpus $gpus \
  --dist-url "auto" \
  --eval-only \
@@ -78,7 +78,7 @@ python train_net.py --config $config \
  $opts
 
 #Pascal Context 59
-python train_net.py --config $config \
+python legacy/train_net.py --config $config \
  --num-gpus $gpus \
  --dist-url "auto" \
  --eval-only \
@@ -91,7 +91,7 @@ python train_net.py --config $config \
  $opts
 
 #Pascal Context 459
-python train_net.py --config $config \
+python legacy/train_net.py --config $config \
  --num-gpus $gpus \
  --dist-url "auto" \
  --eval-only \

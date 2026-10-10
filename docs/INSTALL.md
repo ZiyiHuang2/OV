@@ -17,7 +17,7 @@ uses GPU PyTorch operations, not Detectron2 CUDA ROI/NMS operations.
 `requirements.txt` installs the common runtime packages; PyTorch and
 Detectron2 must also be installed. Prefer the complete script in a new
 environment. Data preparation, synthetic smoke training, ablation commands
-and checkpoint evaluation are documented in [README.md](README.md).
+and checkpoint evaluation are documented in [USAGE.md](USAGE.md).
 
 Actual pre-release checks and GPU limitations are in
 [VALIDATION.md](VALIDATION.md).

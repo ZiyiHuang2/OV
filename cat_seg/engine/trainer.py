@@ -1,9 +1,5 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-"""
-MaskFormer Training Script.
-
-This script is a simplified version of the training script in detectron2/tools.
-"""
+"""CAT-Seg training policy: data loaders, evaluation, optimizer and scheduler."""
 import copy
 import itertools
 import logging
@@ -11,34 +7,19 @@ import os
 from collections import OrderedDict
 from typing import Any, Dict, List, Set
 
-import torch
-
-import detectron2.utils.comm as comm
-from detectron2.checkpoint import DetectionCheckpointer
-from detectron2.config import get_cfg
-from detectron2.data import MetadataCatalog, build_detection_train_loader
-from detectron2.engine import DefaultTrainer, default_argument_parser, default_setup, launch
-from detectron2.evaluation import CityscapesInstanceEvaluator, CityscapesSemSegEvaluator, \
-    COCOEvaluator, COCOPanopticEvaluator, DatasetEvaluators, SemSegEvaluator, verify_results, \
-    DatasetEvaluator
-
-from detectron2.projects.deeplab import add_deeplab_config, build_lr_scheduler
-from detectron2.solver.build import maybe_add_gradient_clipping
-from detectron2.utils.logger import setup_logger
-
-from detectron2.utils.file_io import PathManager
 import numpy as np
 from PIL import Image
-import glob
-
-import pycocotools.mask as mask_util
-
-from detectron2.data import DatasetCatalog, MetadataCatalog
-from detectron2.utils.comm import all_gather, is_main_process, synchronize
-import json
-
-# from detectron2.evaluation import SemSegGzeroEvaluator
-# from mask_former.evaluation.sem_seg_evaluation_gzero import SemSegGzeroEvaluator
+import torch
+import detectron2.utils.comm as comm
+from detectron2.data import MetadataCatalog, build_detection_train_loader
+from detectron2.engine import DefaultTrainer
+from detectron2.evaluation import (
+    CityscapesInstanceEvaluator, CityscapesSemSegEvaluator, COCOEvaluator,
+    COCOPanopticEvaluator, DatasetEvaluators, SemSegEvaluator,
+)
+from detectron2.projects.deeplab import build_lr_scheduler
+from detectron2.solver.build import maybe_add_gradient_clipping
+from detectron2.utils.file_io import PathManager
 
 class VOCbEvaluator(SemSegEvaluator):
     """
@@ -272,53 +253,3 @@ class Trainer(DefaultTrainer):
         res = cls.test(cfg, model, evaluators)
         res = OrderedDict({k + "_TTA": v for k, v in res.items()})
         return res
-
-
-def setup(args):
-    """
-    Create configs and perform basic setups.
-    """
-    cfg = get_cfg()
-    # for poly lr schedule
-    add_deeplab_config(cfg)
-    add_cat_seg_config(cfg)
-    cfg.merge_from_file(args.config_file)
-    cfg.merge_from_list(args.opts)
-    cfg.freeze()
-    default_setup(cfg, args)
-    # Setup logger for "mask_former" module
-    setup_logger(output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="mask_former")
-    return cfg
-
-
-def main(args):
-    cfg = setup(args)
-    torch.set_float32_matmul_precision("high")
-    if args.eval_only:
-        model = Trainer.build_model(cfg)
-        DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
-            cfg.MODEL.WEIGHTS, resume=args.resume
-        )
-        res = Trainer.test(cfg, model)
-        if cfg.TEST.AUG.ENABLED:
-            res.update(Trainer.test_with_TTA(cfg, model))
-        if comm.is_main_process():
-            verify_results(cfg, res)
-        return res
-
-    trainer = Trainer(cfg)
-    trainer.resume_or_load(resume=args.resume)
-    return trainer.train()
-
-
-if __name__ == "__main__":
-    args = default_argument_parser().parse_args()
-    print("Command Line Args:", args)
-    launch(
-        main,
-        args.num_gpus,
-        num_machines=args.num_machines,
-        machine_rank=args.machine_rank,
-        dist_url=args.dist_url,
-        args=(args,),
-    )
