@@ -50,6 +50,8 @@ class CATSegPredictor(nn.Module):
         cad_stages: tuple = (),
         cad_scale: float = 0.01,
         cad_pooling: str = 'mean',
+        epl_routing: str = 'learned',
+        cad_scope: str = 'shared',
     ):
         """
         Args:
@@ -125,6 +127,8 @@ class CATSegPredictor(nn.Module):
             cad_stages=cad_stages,
             cad_scale=cad_scale,
             cad_pooling=cad_pooling,
+            epl_routing=epl_routing,
+            cad_scope=cad_scope,
             )
         self.transformer = transformer
         
@@ -169,6 +173,8 @@ class CATSegPredictor(nn.Module):
         ret['cad_stages'] = tuple(cfg.MODEL.OVRS.CAD_STAGES)
         ret['cad_scale'] = cfg.MODEL.OVRS.CAD_SCALE
         ret['cad_pooling'] = cfg.MODEL.OVRS.CAD_POOLING
+        ret['epl_routing'] = cfg.MODEL.OVRS.EPL_ROUTING
+        ret['cad_scope'] = cfg.MODEL.OVRS.CAD_SCOPE
 
         return ret
 

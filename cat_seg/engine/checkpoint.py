@@ -30,8 +30,13 @@ def model_config(cfg):
         keys += ('MODEL.OVRS.LSK_DILATION',)
     if cfg.MODEL.OVRS.AGGREGATION == 'parallel_epl':
         keys += ('MODEL.OVRS.EPL_EXPERTS',)
+        # Omit new default-valued keys to preserve existing checkpoint contracts.
+        if cfg.MODEL.OVRS.EPL_ROUTING != 'learned':
+            keys += ('MODEL.OVRS.EPL_ROUTING',)
     if cfg.MODEL.OVRS.CAD_STAGES:
         keys += ('MODEL.OVRS.CAD_POOLING',)
+        if cfg.MODEL.OVRS.CAD_SCOPE != 'shared':
+            keys += ('MODEL.OVRS.CAD_SCOPE',)
     result = {}
     for key in keys:
         value = cfg

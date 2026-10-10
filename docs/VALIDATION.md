@@ -117,3 +117,49 @@ Neither synthetic scores nor this postprocessing correction are evidence of
 module gains. Historical real-image results with padding must be recomputed
 using the same corrected evaluator for every ablation. CUDA AMP, 4090 memory,
 real-data gains and distributed execution have not been tested in this review.
+
+## EPL routing and class-conditioned CAD prototypes
+
+The organized prototypes were checked locally on 2026-10-10 using Python 3.12,
+PyTorch 2.5.1+cpu, torchvision 0.20.1+cpu and the same pinned runtime/Detectron2
+versions. The full suite passes **96 tests**, including all 16 experiment YAMLs.
+New checks cover dense uniform experts, a frozen and unexecuted router excluded
+from the actual optimizer, per-class CAD image/class isolation, K=1 equivalence,
+real class counts after attention padding, both CAD stages, class permutation
+at K=1/3/17, finite CPU bfloat16 gradients and rejection of equal-shaped weights
+with a different routing/scope configuration.
+
+`check_prototype_compatibility.py` reads the original files at
+`eb470ec81ef27ea2df9e2bdc559f69fb3cba39bc`. Baseline, full and full_selective
+match their original state keys, parameter initialization, default checkpoint
+configuration signature and aggregation/decoder output exactly (maximum error
+0.0). This comparison does not include CLIP encoding or training loss.
+
+All three new full-sized variants pass CPU forward/backward on a 24x24 grid,
+17 classes and pad_len=256, producing [1,17,96,96] with finite gradients. Each
+allocates 3,079,699 aggregation/decoder parameters. Uniform routing trains
+3,062,987 of them because its two stored routers are frozen. These counts
+exclude CLIP and the outer CATSeg guidance upsampling modules.
+
+The combined full_uniform_class_cad also completed the actual train_ovrs.py
+pipeline with pretrained OpenAI CLIP ViT-B/16: two CPU training iterations on
+six synthetic images with two seen classes, checkpoint saving, same-mechanism
+optimizer/iteration restoration and one further iteration. Its metadata-bearing
+checkpoint was loaded strictly for standalone evaluation on two rectangular
+111x149 images with three test classes, exercising dynamic vocabulary and
+padded inference. The original root config.yaml/run_provenance.json were
+unchanged after resume/evaluation; every invocation retained its own records.
+Synthetic segmentation scores are deliberately not presented as performance
+evidence.
+
+The executed Conv2d-only cost probe reproduces the reported scope: two fusion
+layers at B=1/K=17/C=128/H=W=24 cost 0.642 G MAC (simple), 6.761 G (learned EPL),
+6.598 G (uniform EPL) and 0.906 G (gated). First-stage CAD has 4,513 parameters
+in both scopes; shared mean costs 0.0101 G MAC and per-class costs 0.1717 G.
+These are local convolution counts, not total model FLOPs, measured latency,
+or GPU memory estimates. The scripts regenerate JSON reports under output/;
+runtime outputs, toy data and weights are excluded from git.
+
+No real remote-sensing training, NVIDIA CUDA AMP or 4090 memory measurements
+were performed for these prototypes. The updated Actions workflow separately
+runs tests, both compatibility checks, real-sized variants and the cost probe.

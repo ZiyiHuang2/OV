@@ -13,8 +13,8 @@ CLIP 的图像/文本表示与动态词汇缓存在 predictor 及 CATSeg 中管�
 | 位置 | 负责的内容 | 常见修改 |
 |---|---|---|
 | `cat_seg/modeling/modules/guidance.py` | M1：共享视觉引导的 LSK / 普通卷积适配 | 核大小、膨胀率与残差更新 |
-| `cat_seg/modeling/modules/fusion.py` | M2：simple / EPL / gated 分支融合 | 两路输出的融合机制 |
-| `cat_seg/modeling/modules/decoder.py` | M3：mean / weighted CAD | 类别摘要与 guidance 细化 |
+| `cat_seg/modeling/modules/fusion.py` | M2：simple / EPL / gated 分支融合 | EPL learned/uniform 路由与两路融合 |
+| `cat_seg/modeling/modules/decoder.py` | M3：共享 / 逐类别 CAD | 摘要位置与 guidance 条件化 |
 | `cat_seg/modeling/modules/common.py` | 共用 GroupNorm 构造 | 归一化策略 |
 | `cat_seg/modeling/transformer/model.py` | AggregatorLayer、Aggregator、Up | 串行/并行计算与解码阶段的接入位置 |
 | `cat_seg/modeling/transformer/cat_seg_predictor.py` | 文本编码、缓存与聚合器创建 | 动态词汇及配置参数传递 |
@@ -26,8 +26,15 @@ CLIP 的图像/文本表示与动态词汇缓存在 predictor 及 CATSeg 中管�
 | `tools/prepare_rs_dataset.py` | 标签转换、seen/unseen 与 manifest | 新遥感数据集接入 |
 
 M1 处理 `[B,C,H,W]` 共享 guidance；M2 处理 `[B,C,K,H,W]` 的两路输出；
-M3 从 `[B*K,C,H,W]` 解码特征获得共享摘要。它们没有类别专属参数。
+M3 从 `[B*K,C,H,W]` 解码特征获得共享摘要，或逐类别细化 guidance。
+它们没有类别专属参数。
 解码器收到的是真实候选类别，class attention 的内部 padding 不进入 CAD。
+
+`AggregatorLayer` 包含空间分支、类别分支与 M2；`Up` 包含上采样、M3 和
+拼接后的 DoubleConv。`ClassGuidanceRefiner` 继承共享 CAD 的参数结构和
+细化变换，只改变 cost 的条件化位置与 guidance 展开方式。源码文件分开
+用于定位修改，模型的包含与依赖关系仍通过这些调用连接；详见
+[原型说明](PROTOTYPES.md)。
 
 ## 配置如何继承
 
@@ -44,6 +51,7 @@ opts，例如 `MODEL.OVRS.CAD_POOLING weighted`，实际配置会写入输出目
 - [USAGE.md](USAGE.md)：数据格式、训练、评测和消融命令。
 - [INSTALL.md](INSTALL.md)：环境与编译要求。
 - [DESIGN.md](DESIGN.md)：`full_selective` 的机制与取舍。
+- [PROTOTYPES.md](PROTOTYPES.md)：EPL 路由、CAD 作用范围及组合实验。
 - [AUDIT.md](AUDIT.md)：初版三个模块的审查。
 - [VALIDATION.md](VALIDATION.md)：已验证范围与限制。
 - [UPSTREAM.json](UPSTREAM.json)：依赖来源和固定版本。

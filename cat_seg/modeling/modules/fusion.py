@@ -12,11 +12,17 @@ EPL adaptation uses GroupNorm instead of source SyncBatchNorm. This avoids
 coupling normalization statistics to the current category set / GPU batch.
 """
 
-    def __init__(self, channels, mode="simple", experts=4, residual_scale=0.01):
+    def __init__(self, channels, mode="simple", experts=4, residual_scale=0.01,
+                 epl_routing="learned"):
         super().__init__()
         if mode not in {"simple", "epl", "gated"} or experts < 1:
             raise ValueError("fusion mode must be simple/epl/gated; experts must be positive")
+        if epl_routing not in {"learned", "uniform"}:
+            raise ValueError("EPL routing must be learned/uniform")
+        if mode != "epl" and epl_routing != "learned":
+            raise ValueError("uniform EPL routing requires EPL fusion")
         self.mode = mode
+        self.epl_routing = epl_routing
         self.scale = nn.Parameter(torch.tensor(float(residual_scale)))
         if mode == "simple":
             self.fuse = nn.Conv2d(2 * channels, channels, 1)
@@ -51,6 +57,10 @@ coupling normalization statistics to the current category set / GPU batch.
                 nn.Conv2d(max(channels // 4, 1), experts, 1), nn.Softmax(dim=1),
             )
             self.residual = nn.Conv2d(2 * channels, channels, 1)
+            if epl_routing == "uniform":
+                # Keep construction order and state keys identical to learned EPL.
+                # The router is stored, but never executed or optimized.
+                self.gate.requires_grad_(False)
 
     def forward(self, spatial, category):
         if spatial.shape != category.shape or spatial.ndim != 5:
@@ -68,9 +78,10 @@ coupling normalization statistics to the current category set / GPU batch.
             fused = self.refine(torch.cat([spatial, category], dim=1))
         else:
             feature = torch.cat([self.spatial_proj(spatial), self.class_proj(category)], dim=1)
-            weights = self.gate(feature)
+            weights = self.gate(feature) if self.epl_routing == "learned" else None
             fused = self.residual(feature)
             for index, expert in enumerate(self.experts):
-                fused = fused + weights[:, index:index + 1] * expert(feature)
+                weight = weights[:, index:index + 1] if weights is not None else 1.0 / len(self.experts)
+                fused = fused + weight * expert(feature)
         fused = base + self.scale * fused
         return fused.reshape(batch, classes, channels, height, width).permute(0, 2, 1, 3, 4)

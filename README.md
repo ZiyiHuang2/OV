@@ -6,6 +6,10 @@
 `full` 是并行 EPL 的借鉴组合；`full_selective` 使用两路门控融合和类别加权
 CAD。两者均保留原上采样方式，真实遥感性能仍需在你的数据与协议下验证。
 
+新增 `full_epl_uniform`、`full_class_cad` 与 `full_uniform_class_cad`，分别比较
+专家路由、逐类别 guidance 细化及两者组合。接入契约、模块包含关系和实验矩阵
+见 [原型说明](docs/PROTOTYPES.md)。原有默认配置保持兼容。
+
 ## 快速开始
 
 在仓库根目录执行以下命令。建议使用独立的 Linux / Python 3.10 环境。
@@ -47,7 +51,7 @@ python train_ovrs.py --dataset-manifest data/dlrsd/manifest.json \
 |---|---|---|
 | M1：共享空间引导 | [guidance.py](cat_seg/modeling/modules/guidance.py) | 类别展开前处理视觉 guidance；含 LSK 与普通卷积对照 |
 | M2：并行分支融合 | [fusion.py](cat_seg/modeling/modules/fusion.py) | 空间与类别分支读取相同输入，再用 simple / EPL / gated 融合 |
-| M3：解码引导细化 | [decoder.py](cat_seg/modeling/modules/decoder.py) | 上采样后汇总类别解码特征，再细化 guidance |
+| M3：解码引导细化 | [decoder.py](cat_seg/modeling/modules/decoder.py) | 上采样后通过共享摘要或各类别 cost 细化 guidance |
 
 接入位置集中在 [transformer/model.py](cat_seg/modeling/transformer/model.py)；
 开关定义在 [config.py](cat_seg/config.py)，实验组合在 [configs/ovrs](configs/ovrs)。
