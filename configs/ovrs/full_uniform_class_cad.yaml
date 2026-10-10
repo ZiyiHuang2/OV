@@ -1,0 +1,4 @@
+_BASE_: "full_class_cad.yaml"
+MODEL:
+  OVRS:
+    EPL_ROUTING: "uniform"

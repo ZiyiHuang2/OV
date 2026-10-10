@@ -14,6 +14,7 @@ from einops.layers.torch import Rearrange
 from timm.layers import PatchEmbed, Mlp, DropPath, to_2tuple, to_ntuple, trunc_normal_, _assert
 from ..modules import (
     LSKGuidanceAdapter, ConvGuidanceAdapter, ParallelFusion, CostGuidanceRefiner,
+    ClassGuidanceRefiner,
 )
 
 # Modified Swin Transformer blocks for guidance implementetion
@@ -483,8 +484,12 @@ class Bottleneck(nn.Module):
 
 
 class AggregatorLayer(nn.Module):
-    def __init__(self, hidden_dim=64, text_guidance_dim=512, appearance_guidance=512, nheads=4, input_resolution=(20, 20), pooling_size=(5, 5), window_size=(10, 10), attention_type='linear', pad_len=256, aggregation='serial', epl_experts=4, fusion_scale=0.01) -> None:
+    def __init__(self, hidden_dim=64, text_guidance_dim=512, appearance_guidance=512, nheads=4, input_resolution=(20, 20), pooling_size=(5, 5), window_size=(10, 10), attention_type='linear', pad_len=256, aggregation='serial', epl_experts=4, fusion_scale=0.01, epl_routing='learned') -> None:
         super().__init__()
+        if epl_routing not in {'learned', 'uniform'}:
+            raise ValueError('EPL routing must be learned/uniform')
+        if epl_routing == 'uniform' and aggregation != 'parallel_epl':
+            raise ValueError('uniform EPL routing requires parallel_epl aggregation')
         self.swin_block = SwinTransformerBlockWrapper(hidden_dim, appearance_guidance, input_resolution, nheads, window_size)
         self.attention = ClassTransformerLayer(hidden_dim, text_guidance_dim, nheads=nheads, attention_type=attention_type, pooling_size=pooling_size, pad_len=pad_len)
         if aggregation not in {'serial', 'parallel_simple', 'parallel_epl', 'parallel_gated'}:
@@ -494,6 +499,7 @@ class AggregatorLayer(nn.Module):
             hidden_dim, mode={'parallel_simple': 'simple', 'parallel_epl': 'epl', 'parallel_gated': 'gated'}[aggregation],
             experts=epl_experts,
             residual_scale=fusion_scale,
+            epl_routing=epl_routing,
         )
 
     def forward(self, x, appearance_guidance, text_guidance):
@@ -553,28 +559,43 @@ class DoubleConv(nn.Module):
 class Up(nn.Module):
     """Upscaling then double conv"""
 
-    def __init__(self, in_channels, out_channels, guidance_channels, cad=False, cad_scale=0.01, cad_pooling='mean'):
+    def __init__(self, in_channels, out_channels, guidance_channels, cad=False,
+                 cad_scale=0.01, cad_pooling='mean', cad_scope='shared'):
         super().__init__()
+        if cad_scope not in {'shared', 'per_class'}:
+            raise ValueError('CAD scope must be shared/per_class')
+        if cad_scope == 'per_class' and cad_pooling != 'mean':
+            raise ValueError('per_class CAD requires CAD_POOLING mean; it does not pool classes')
+        self.cad_scope = cad_scope
 
         self.up = nn.ConvTranspose2d(in_channels, in_channels - guidance_channels, kernel_size=2, stride=2)
         self.conv = DoubleConv(in_channels, out_channels)
         if cad and guidance_channels <= 0:
             raise ValueError('CAD needs decoder guidance')
-        self.guidance_refiner = CostGuidanceRefiner(
+        refiner = CostGuidanceRefiner if cad_scope == 'shared' else ClassGuidanceRefiner
+        self.guidance_refiner = refiner(
             in_channels - guidance_channels, guidance_channels,
             residual_scale=cad_scale,
             pooling=cad_pooling,
         ) if cad else None
 
-    def forward(self, x, guidance=None):
+    def forward(self, x, guidance=None, *, num_classes=None):
+        # Aggregator supplies the real K explicitly, before class attention padding.
+        # Direct callers may retain the original shared-guidance API.
+        if guidance is not None:
+            if guidance.ndim != 4 or guidance.shape[0] < 1 or x.shape[0] < 1 or x.shape[0] % guidance.shape[0]:
+                raise ValueError('decoder cost batch must be a positive multiple of shared guidance batch')
+            classes = x.shape[0] // guidance.shape[0]
+            if num_classes is not None and (num_classes < 1 or classes != num_classes):
+                raise ValueError('decoder cost batch does not match B * num_classes')
         x = self.up(x)
         if self.guidance_refiner is not None:
             if guidance is None:
                 raise ValueError('CAD was enabled but decoder guidance is missing')
             guidance = self.guidance_refiner(x, guidance)
         if guidance is not None:
-            T = x.size(0) // guidance.size(0)
-            guidance = repeat(guidance, "B C H W -> (B T) C H W", T=T)
+            if self.guidance_refiner is None or self.cad_scope == 'shared':
+                guidance = repeat(guidance, "B C H W -> (B T) C H W", T=classes)
             x = torch.cat([x, guidance], dim=1)
         return self.conv(x)
 
@@ -606,6 +627,8 @@ class Aggregator(nn.Module):
         cad_stages=(),
         cad_scale=0.01,
         cad_pooling='mean',
+        epl_routing='learned',
+        cad_scope='shared',
     ) -> None:
         """
         Cost Aggregation Model for CAT-Seg
@@ -637,6 +660,14 @@ class Aggregator(nn.Module):
         self.hidden_dim = hidden_dim
         if context_adapter not in {'none', 'lsk', 'conv'}:
             raise ValueError('Unknown context adapter: ' + context_adapter)
+        if epl_routing not in {'learned', 'uniform'}:
+            raise ValueError('EPL routing must be learned/uniform')
+        if epl_routing == 'uniform' and aggregation != 'parallel_epl':
+            raise ValueError('uniform EPL routing requires parallel_epl aggregation')
+        if cad_scope not in {'shared', 'per_class'}:
+            raise ValueError('CAD scope must be shared/per_class')
+        if cad_scope == 'per_class' and cad_pooling != 'mean':
+            raise ValueError('per_class CAD requires CAD_POOLING mean; it does not pool classes')
         if any(stage not in {1, 2} for stage in cad_stages):
             raise ValueError('CAD stages must be 1 and/or 2')
         if context_adapter != 'none' and appearance_guidance_proj_dim <= 0:
@@ -656,6 +687,7 @@ class Aggregator(nn.Module):
                 nheads=nheads, input_resolution=feature_resolution, pooling_size=pooling_size, window_size=window_size, attention_type=attention_type, pad_len=pad_len,
                 aggregation=aggregation, epl_experts=epl_experts,
                 fusion_scale=fusion_scale,
+                epl_routing=epl_routing,
             ) for _ in range(num_layers)
         ])
 
@@ -678,8 +710,8 @@ class Aggregator(nn.Module):
             ) for d, dp in zip(decoder_guidance_dims, decoder_guidance_proj_dims)
         ]) if decoder_guidance_dims[0] > 0 else None
 
-        self.decoder1 = Up(hidden_dim, decoder_dims[0], decoder_guidance_proj_dims[0], cad=1 in cad_stages, cad_scale=cad_scale, cad_pooling=cad_pooling)
-        self.decoder2 = Up(decoder_dims[0], decoder_dims[1], decoder_guidance_proj_dims[1], cad=2 in cad_stages, cad_scale=cad_scale, cad_pooling=cad_pooling)
+        self.decoder1 = Up(hidden_dim, decoder_dims[0], decoder_guidance_proj_dims[0], cad=1 in cad_stages, cad_scale=cad_scale, cad_pooling=cad_pooling, cad_scope=cad_scope)
+        self.decoder2 = Up(decoder_dims[0], decoder_dims[1], decoder_guidance_proj_dims[1], cad=2 in cad_stages, cad_scale=cad_scale, cad_pooling=cad_pooling, cad_scope=cad_scope)
         self.head = nn.Conv2d(decoder_dims[1], 1, kernel_size=3, stride=1, padding=1)
 
         self.pad_len = pad_len
@@ -723,8 +755,8 @@ class Aggregator(nn.Module):
     def conv_decoder(self, x, guidance):
         B = x.shape[0]
         corr_embed = rearrange(x, 'B C T H W -> (B T) C H W')
-        corr_embed = self.decoder1(corr_embed, guidance[0])
-        corr_embed = self.decoder2(corr_embed, guidance[1])
+        corr_embed = self.decoder1(corr_embed, guidance[0], num_classes=x.shape[2])
+        corr_embed = self.decoder2(corr_embed, guidance[1], num_classes=x.shape[2])
         corr_embed = self.head(corr_embed)
         corr_embed = rearrange(corr_embed, '(B T) () H W -> B T H W', B=B)
         return corr_embed

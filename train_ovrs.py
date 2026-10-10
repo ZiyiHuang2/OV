@@ -23,7 +23,8 @@ from cat_seg.engine.records import setup_run
 ROOT = Path(__file__).resolve().parent
 EXPERIMENTS = ('baseline', 'parallel_simple', 'parallel_epl', 'lsk', 'conv',
                'cad', 'epl_lsk', 'epl_cad', 'full', 'full_cad_both',
-               'parallel_gated', 'cad_weighted', 'full_selective')
+               'parallel_gated', 'cad_weighted', 'full_selective',
+               'full_epl_uniform', 'full_class_cad', 'full_uniform_class_cad')
 
 
 def harmonic_iou(seen, unseen):

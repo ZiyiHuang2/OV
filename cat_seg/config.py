@@ -99,7 +99,9 @@ def add_cat_seg_config(cfg):
     cfg.MODEL.OVRS.LSK_DILATION = 3
     cfg.MODEL.OVRS.LSK_SCALE = 0.01
     cfg.MODEL.OVRS.EPL_EXPERTS = 4
+    cfg.MODEL.OVRS.EPL_ROUTING = 'learned'
     cfg.MODEL.OVRS.FUSION_SCALE = 0.01
     cfg.MODEL.OVRS.CAD_STAGES = []
     cfg.MODEL.OVRS.CAD_SCALE = 0.01
     cfg.MODEL.OVRS.CAD_POOLING = 'mean'
+    cfg.MODEL.OVRS.CAD_SCOPE = 'shared'

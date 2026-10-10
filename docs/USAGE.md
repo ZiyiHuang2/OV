@@ -42,12 +42,20 @@ ROI/NMS 算子，因此安装时只编译 Detectron2 CPU 扩展，训练仍在 G
 python tools/smoke_aggregator.py --classes 17
 python tools/smoke_aggregator.py --classes 17 --full --device cuda
 python tools/smoke_aggregator.py --classes 17 --selective --device cuda
+python tools/smoke_aggregator.py --classes 17 --full --epl-routing uniform --device cuda
+python tools/smoke_aggregator.py --classes 17 --full --cad-scope per_class --device cuda
 python tools/check_baseline_equivalence.py
+python tools/check_prototype_compatibility.py
+python tools/probe_module_cost.py
 ```
 
-最后一个命令下载固定版本的原 Aggregator 源文件，比较新增模块关闭时的
+check_baseline_equivalence 下载固定版本的原 Aggregator 源文件，比较新增模块关闭时的
 前向输出与权重键。它不表示训练损失与上游完全相同，见第 6 节。
 smoke_aggregator 的显存数字不包含 CLIP，不能作为完整训练显存。
+check_prototype_compatibility 对照原型前的 OV commit，检查原 baseline/full/
+full_selective 的参数初值、前向输出与默认 checkpoint 配置签名。
+probe_module_cost 只统计执行的 Conv2d MAC，不含 attention、CLIP、归一化
+及上采样，也不测 GPU 延迟或显存。结果写入 output/prototype_costs.json。
 
 完整管线的合成数据检查：
 
@@ -189,10 +197,17 @@ evaluation.json 包含整体、逐类与 seen/unseen mIoU。
 | parallel_gated | 分歧条件的两路门控融合 | 无 | 无 |
 | cad_weighted | 原串行 | 无 | 第一级，类别加权摘要 |
 | full_selective | 两路门控融合 | LSK | 第一级，类别加权摘要 |
+| full_epl_uniform | 并行 EPL，专家等权 | LSK | 第一级，共享 mean |
+| full_class_cad | 并行 EPL，学习路由 | LSK | 第一级，逐类别 |
+| full_uniform_class_cad | 并行 EPL，专家等权 | LSK | 第一级，逐类别 |
 
 普通卷积对照不是严格的等参数/等感受野对照；要作相应机制主张需进一步匹配。
 并行版本每层只计算一次空间分支和一次类别分支，与串行计算次数相同，
 但 EPL 带来额外参数/计算，因此不能称整个模型等 FLOPs。
+
+后三项与 full 组成 2×2 对照，运行命令、初始化要求和张量契约见
+[原型说明](PROTOTYPES.md)。`CAD_SCOPE: per_class` 要求 `CAD_POOLING: mean`；
+此时 mean 只是合法配置值，前向不执行类别平均。使用 weighted 会报错。
 
 ## 6. 实现边界
 
@@ -205,6 +220,10 @@ evaluation.json 包含整体、逐类与 seen/unseen mIoU。
 - CAD 先用原转置卷积上采样，再对真实 K 个类别的解码特征求平均，细化
   单路 CLIP guidance，然后拼接与 DoubleConv。新增细化以可学习小幅残差接入，
   初值为 0.01（MODEL.OVRS.CAD_SCALE）。没有结构教师或置信度估计。
+- `EPL_ROUTING: uniform` 保留专家、投影、残差和路由器张量，冻结并跳过
+  路由器，所有专家仍运行。`CAD_SCOPE: per_class` 复用同一细化变换，把
+  guidance 展开到 B×K，各类别独立条件化；其局部独立性不等于上游类别
+  attention 对候选词表独立。
 - `parallel_gated` 按位置与类别选择空间/类别分支，另用单个轻量残差细化，
   不使用 EPL 专家。`CAD_POOLING: weighted` 用共享 scorer 对类别摘要加权；
   路由与摘要权重均是学习偏好，不能当作校准后的可靠性或类别概率。
