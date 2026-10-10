@@ -17,11 +17,14 @@ def main():
     parser.add_argument('--classes', type=int, default=17)
     parser.add_argument('--batch', type=int, default=1)
     parser.add_argument('--full', action='store_true')
+    parser.add_argument('--selective', action='store_true', help='Test gated fusion + weighted CAD + LSK')
     args = parser.parse_args()
     if args.device == 'cpu':
         torch.set_num_threads(2)
     device = torch.device(args.device)
     options = dict(aggregation='parallel_epl', context_adapter='lsk', cad_stages=(1,)) if args.full else {}
+    if args.selective:
+        options = dict(aggregation='parallel_gated', context_adapter='lsk', cad_stages=(1,), cad_pooling='weighted')
     model = Aggregator(num_layers=2, pooling_size=(2, 2), pad_len=256, **options).to(device).train()
     batch, classes = args.batch, args.classes
     image = torch.randn(batch, 512, 24, 24, device=device)
@@ -42,7 +45,7 @@ def main():
                       'loss': loss.item(), 'seconds': time.perf_counter() - started,
                       'parameters': sum(p.numel() for p in model.parameters()),
                       'peak_gpu_mib': torch.cuda.max_memory_allocated() / 2**20 if device.type == 'cuda' else None,
-                      'includes_clip': False, 'full': args.full}, indent=2))
+                      'includes_clip': False, 'full': args.full, 'selective': args.selective}, indent=2))
 
 
 if __name__ == '__main__':

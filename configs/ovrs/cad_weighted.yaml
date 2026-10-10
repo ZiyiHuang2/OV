@@ -1,0 +1,5 @@
+_BASE_: base.yaml
+MODEL:
+  OVRS:
+    CAD_STAGES: [1]
+    CAD_POOLING: weighted

@@ -20,7 +20,8 @@ from train_net import Trainer
 
 ROOT = Path(__file__).resolve().parent
 EXPERIMENTS = ('baseline', 'parallel_simple', 'parallel_epl', 'lsk', 'conv',
-               'cad', 'epl_lsk', 'epl_cad', 'full', 'full_cad_both')
+               'cad', 'epl_lsk', 'epl_cad', 'full', 'full_cad_both',
+               'parallel_gated', 'cad_weighted', 'full_selective')
 
 
 def harmonic_iou(seen, unseen):

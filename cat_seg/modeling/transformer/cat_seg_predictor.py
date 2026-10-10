@@ -49,6 +49,7 @@ class CATSegPredictor(nn.Module):
         fusion_scale: float = 0.01,
         cad_stages: tuple = (),
         cad_scale: float = 0.01,
+        cad_pooling: str = 'mean',
     ):
         """
         Args:
@@ -123,6 +124,7 @@ class CATSegPredictor(nn.Module):
             fusion_scale=fusion_scale,
             cad_stages=cad_stages,
             cad_scale=cad_scale,
+            cad_pooling=cad_pooling,
             )
         self.transformer = transformer
         
@@ -166,6 +168,7 @@ class CATSegPredictor(nn.Module):
         ret['fusion_scale'] = cfg.MODEL.OVRS.FUSION_SCALE
         ret['cad_stages'] = tuple(cfg.MODEL.OVRS.CAD_STAGES)
         ret['cad_scale'] = cfg.MODEL.OVRS.CAD_SCALE
+        ret['cad_pooling'] = cfg.MODEL.OVRS.CAD_POOLING
 
         return ret
 

@@ -74,12 +74,27 @@ coupling normalization statistics to the current category set / GPU batch.
 
     def __init__(self, channels, mode="simple", experts=4, residual_scale=0.01):
         super().__init__()
-        if mode not in {"simple", "epl"} or experts < 1:
-            raise ValueError("fusion mode must be simple/epl; experts must be positive")
+        if mode not in {"simple", "epl", "gated"} or experts < 1:
+            raise ValueError("fusion mode must be simple/epl/gated; experts must be positive")
         self.mode = mode
         self.scale = nn.Parameter(torch.tensor(float(residual_scale)))
         if mode == "simple":
             self.fuse = nn.Conv2d(2 * channels, channels, 1)
+        elif mode == "gated":
+            # Each class/location chooses between two different aggregation paths.
+            # These scores are learned preferences, not calibrated uncertainty.
+            self.route = nn.Sequential(
+                group_norm(3 * channels),
+                nn.Conv2d(3 * channels, max(channels // 4, 1), 1), nn.GELU(),
+                nn.Conv2d(max(channels // 4, 1), 2, 1),
+            )
+            nn.init.normal_(self.route[-1].weight, std=1e-3)
+            nn.init.zeros_(self.route[-1].bias)
+            self.refine = nn.Sequential(
+                nn.Conv2d(2 * channels, channels, 1, bias=False),
+                group_norm(channels), nn.GELU(),
+                nn.Conv2d(channels, channels, 3, padding=1, groups=channels),
+            )
         else:
             self.spatial_proj = nn.Conv2d(channels, channels, 1)
             self.class_proj = nn.Conv2d(channels, channels, 1)
@@ -106,6 +121,11 @@ coupling normalization statistics to the current category set / GPU batch.
         base = 0.5 * (spatial + category)
         if self.mode == "simple":
             fused = self.fuse(torch.cat([spatial, category], dim=1))
+        elif self.mode == "gated":
+            routing = torch.cat([spatial, category, (spatial - category).abs()], dim=1)
+            weights = self.route(routing).float().softmax(dim=1).to(spatial.dtype)
+            base = weights[:, :1] * spatial + weights[:, 1:] * category
+            fused = self.refine(torch.cat([spatial, category], dim=1))
         else:
             feature = torch.cat([self.spatial_proj(spatial), self.class_proj(category)], dim=1)
             weights = self.gate(feature)
@@ -119,8 +139,14 @@ coupling normalization statistics to the current category set / GPU batch.
 class CostGuidanceRefiner(nn.Module):
     """Single-stream CAD; summary is a decoder feature, not confidence."""
 
-    def __init__(self, cost_channels, guidance_channels, residual_scale=0.01):
+    def __init__(self, cost_channels, guidance_channels, residual_scale=0.01, pooling="mean"):
         super().__init__()
+        if pooling not in {"mean", "weighted"}:
+            raise ValueError("CAD pooling must be mean/weighted")
+        self.class_score = nn.Conv2d(cost_channels, 1, 1, bias=False) if pooling == "weighted" else None
+        if self.class_score is not None:
+            # Start near uniform pooling while retaining gradients through the scorer.
+            nn.init.normal_(self.class_score.weight, std=1e-3)
         self.scale = nn.Parameter(torch.tensor(float(residual_scale)))
         self.cost_projection = nn.Sequential(
             nn.Conv2d(cost_channels, guidance_channels, 1, bias=False),
@@ -133,6 +159,14 @@ class CostGuidanceRefiner(nn.Module):
             group_norm(guidance_channels),
         )
 
+    def summarize(self, upsampled_cost, batch):
+        cost = upsampled_cost.reshape(batch, -1, *upsampled_cost.shape[1:])
+        if self.class_score is None:
+            return cost.mean(dim=1)
+        scores = self.class_score(upsampled_cost).reshape(batch, -1, 1, *cost.shape[-2:])
+        weights = scores.float().softmax(dim=1).to(cost.dtype)
+        return (weights * cost).sum(dim=1)
+
     def forward(self, upsampled_cost, guidance):
         if guidance.ndim != 4 or upsampled_cost.ndim != 4:
             raise ValueError("CAD expects [B*K,C,H,W] cost and [B,D,H,W] guidance")
@@ -141,6 +175,6 @@ class CostGuidanceRefiner(nn.Module):
             raise ValueError("cost batch must be an integer multiple of guidance batch")
         if upsampled_cost.shape[-2:] != guidance.shape[-2:]:
             raise ValueError("CAD cost and guidance spatial sizes must match")
-        summary = upsampled_cost.reshape(batch, -1, *upsampled_cost.shape[1:]).mean(dim=1)
+        summary = self.summarize(upsampled_cost, batch)
         relevance = (self.cost_projection(summary) * guidance).sigmoid()
         return guidance + self.scale * self.refinement(relevance * guidance)

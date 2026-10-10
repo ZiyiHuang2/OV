@@ -6,7 +6,7 @@ UPSTREAM.json. Detectron2 CPU extensions were built locally with gcc/g++.
 
 ## Passed checks
 
-- `python -m pytest -q`: 37 tests passed. Coverage includes module forward
+- `python -m pytest -q`: 50 tests passed. Coverage includes module forward
   and backward, finite and nonzero new-module gradients, dynamic class counts
   (1, 3 and 17), class permutation, CAD isolation between images, masked BCE,
   text vocabulary/cache/gradient behavior, label conversion and all configs.
@@ -51,3 +51,19 @@ All experiments share the corrected ignore-pixel BCE. Consequently the
 baseline is structurally identical when modules are disabled, but its
 training objective is not an exact reproduction of upstream ignored-pixel
 handling. EPL uses GroupNorm and is explicitly an adaptation.
+
+## Selective design validation
+
+`full_selective` adds branch gating and weighted CAD while retaining the
+previous `full` computation. The full-size selective aggregator passed
+forward/backward with `[1,17,96,96]` output and 2,476,271 parameters.
+Tests additionally cover selectable branches, uniform/scored class pooling,
+class permutation with padding, whole-vocabulary duplication and CPU
+bfloat16 autocast backward. CPU autocast is not CUDA AMP validation.
+
+The complete pretrained-CLIP selective pipeline was trained for three CPU
+iterations on the same six synthetic images (two train classes), followed
+by evaluation on two images with three test classes. The saved selective
+checkpoint was reloaded for evaluation. The previous full-model checkpoint
+was also loaded strictly and evaluated successfully. Synthetic accuracy
+is not reported as evidence of improved segmentation.

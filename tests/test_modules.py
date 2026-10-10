@@ -28,6 +28,9 @@ def inputs(batch=1, classes=3):
     {'context_adapter': 'lsk'}, {'cad_stages': (1,)},
     {'aggregation': 'parallel_epl', 'context_adapter': 'lsk', 'cad_stages': (1,)},
     {'aggregation': 'parallel_epl', 'context_adapter': 'lsk', 'cad_stages': (1, 2)},
+    {'aggregation': 'parallel_gated'},
+    {'cad_stages': (1,), 'cad_pooling': 'weighted'},
+    {'aggregation': 'parallel_gated', 'context_adapter': 'lsk', 'cad_stages': (1,), 'cad_pooling': 'weighted'},
 ])
 def test_forward_backward(options):
     model = make_model(**options).train()
@@ -42,8 +45,11 @@ def test_forward_backward(options):
 
 
 @pytest.mark.parametrize('classes', [1, 3, 17])
-def test_dynamic_vocabulary_and_permutation(classes):
-    model = make_model(aggregation='parallel_epl', context_adapter='lsk', cad_stages=(1,), pad_len=24).eval()
+@pytest.mark.parametrize('selective', [False, True])
+def test_dynamic_vocabulary_and_permutation(classes, selective):
+    model = make_model(aggregation='parallel_gated' if selective else 'parallel_epl',
+                       context_adapter='lsk', cad_stages=(1,), pad_len=24,
+                       cad_pooling='weighted' if selective else 'mean').eval()
     image, text, guidance = inputs(classes=classes)
     permutation = torch.randperm(classes)
     with torch.no_grad():
@@ -53,8 +59,9 @@ def test_dynamic_vocabulary_and_permutation(classes):
     torch.testing.assert_close(reordered, original[:, permutation], atol=2e-5, rtol=2e-5)
 
 
-def test_cad_does_not_mix_images_and_is_category_order_invariant():
-    refiner = CostGuidanceRefiner(12, 8)
+@pytest.mark.parametrize('pooling', ['mean', 'weighted'])
+def test_cad_does_not_mix_images_and_is_category_order_invariant(pooling):
+    refiner = CostGuidanceRefiner(12, 8, pooling=pooling)
     cost = torch.randn(2, 3, 12, 16, 16)
     guide = torch.randn(2, 8, 16, 16)
     combined = refiner(cost.reshape(6, 12, 16, 16), guide)
@@ -140,3 +147,43 @@ def test_full_model_wires_shared_guidance_and_real_class_count():
     assert events[0][1] == [(2, 16, 8, 8)]
     assert events[1][1] == [(2, 32, 3, 8, 8)] * 2
     assert events[3][1] == [(6, 24, 16, 16), (2, 8, 16, 16)]
+
+
+def test_gated_fusion_can_choose_a_branch_without_scaling_it_away():
+    fusion = ParallelFusion(16, mode='gated', residual_scale=0)
+    with torch.no_grad():
+        fusion.route[-1].weight.zero_()
+        fusion.route[-1].bias.copy_(torch.tensor([20., -20.]))
+    spatial, category = torch.randn(2, 16, 3, 8, 8), torch.randn(2, 16, 3, 8, 8)
+    torch.testing.assert_close(fusion(spatial, category), spatial, rtol=1e-6, atol=1e-6)
+    with torch.no_grad():
+        fusion.route[-1].bias.neg_()
+    torch.testing.assert_close(fusion(spatial, category), category, rtol=1e-6, atol=1e-6)
+
+
+def test_weighted_cad_can_retain_local_category_evidence():
+    refiner = CostGuidanceRefiner(2, 4, pooling='weighted')
+    cost = torch.zeros(3, 2, 4, 4)
+    cost[0, :, :2] = 10
+    cost[1, :, 2:] = 10
+    with torch.no_grad():
+        refiner.class_score.weight.zero_()
+    torch.testing.assert_close(refiner.summarize(cost, 1), cost.mean(dim=0, keepdim=True))
+    with torch.no_grad():
+        refiner.class_score.weight[:, 0] = 1
+    selected = refiner.summarize(cost, 1)
+    assert (selected > 9.9).all()
+    # Duplicating the whole vocabulary cannot change the weighted summary.
+    torch.testing.assert_close(selected, refiner.summarize(cost.repeat(2, 1, 1, 1), 1))
+
+
+def test_selective_full_model_cpu_autocast_backward():
+    model = make_model(aggregation='parallel_gated', context_adapter='lsk',
+                       cad_stages=(1,), cad_pooling='weighted')
+    with torch.autocast('cpu', dtype=torch.bfloat16):
+        output = model(*inputs(batch=2, classes=3))
+        loss = output.float().square().mean()
+    loss.backward()
+    assert torch.isfinite(output).all()
+    assert model.layers[0].fusion.route[-1].weight.grad.abs().sum() > 0
+    assert model.decoder1.guidance_refiner.class_score.weight.grad.abs().sum() > 0

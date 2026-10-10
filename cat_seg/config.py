@@ -102,3 +102,4 @@ def add_cat_seg_config(cfg):
     cfg.MODEL.OVRS.FUSION_SCALE = 0.01
     cfg.MODEL.OVRS.CAD_STAGES = []
     cfg.MODEL.OVRS.CAD_SCALE = 0.01
+    cfg.MODEL.OVRS.CAD_POOLING = 'mean'

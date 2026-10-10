@@ -487,11 +487,11 @@ class AggregatorLayer(nn.Module):
         super().__init__()
         self.swin_block = SwinTransformerBlockWrapper(hidden_dim, appearance_guidance, input_resolution, nheads, window_size)
         self.attention = ClassTransformerLayer(hidden_dim, text_guidance_dim, nheads=nheads, attention_type=attention_type, pooling_size=pooling_size, pad_len=pad_len)
-        if aggregation not in {'serial', 'parallel_simple', 'parallel_epl'}:
+        if aggregation not in {'serial', 'parallel_simple', 'parallel_epl', 'parallel_gated'}:
             raise ValueError('Unknown aggregation: ' + aggregation)
         self.aggregation = aggregation
         self.fusion = None if aggregation == 'serial' else ParallelFusion(
-            hidden_dim, mode='epl' if aggregation == 'parallel_epl' else 'simple',
+            hidden_dim, mode={'parallel_simple': 'simple', 'parallel_epl': 'epl', 'parallel_gated': 'gated'}[aggregation],
             experts=epl_experts,
             residual_scale=fusion_scale,
         )
@@ -553,7 +553,7 @@ class DoubleConv(nn.Module):
 class Up(nn.Module):
     """Upscaling then double conv"""
 
-    def __init__(self, in_channels, out_channels, guidance_channels, cad=False, cad_scale=0.01):
+    def __init__(self, in_channels, out_channels, guidance_channels, cad=False, cad_scale=0.01, cad_pooling='mean'):
         super().__init__()
 
         self.up = nn.ConvTranspose2d(in_channels, in_channels - guidance_channels, kernel_size=2, stride=2)
@@ -563,6 +563,7 @@ class Up(nn.Module):
         self.guidance_refiner = CostGuidanceRefiner(
             in_channels - guidance_channels, guidance_channels,
             residual_scale=cad_scale,
+            pooling=cad_pooling,
         ) if cad else None
 
     def forward(self, x, guidance=None):
@@ -604,6 +605,7 @@ class Aggregator(nn.Module):
         fusion_scale=0.01,
         cad_stages=(),
         cad_scale=0.01,
+        cad_pooling='mean',
     ) -> None:
         """
         Cost Aggregation Model for CAT-Seg
@@ -676,8 +678,8 @@ class Aggregator(nn.Module):
             ) for d, dp in zip(decoder_guidance_dims, decoder_guidance_proj_dims)
         ]) if decoder_guidance_dims[0] > 0 else None
 
-        self.decoder1 = Up(hidden_dim, decoder_dims[0], decoder_guidance_proj_dims[0], cad=1 in cad_stages, cad_scale=cad_scale)
-        self.decoder2 = Up(decoder_dims[0], decoder_dims[1], decoder_guidance_proj_dims[1], cad=2 in cad_stages, cad_scale=cad_scale)
+        self.decoder1 = Up(hidden_dim, decoder_dims[0], decoder_guidance_proj_dims[0], cad=1 in cad_stages, cad_scale=cad_scale, cad_pooling=cad_pooling)
+        self.decoder2 = Up(decoder_dims[0], decoder_dims[1], decoder_guidance_proj_dims[1], cad=2 in cad_stages, cad_scale=cad_scale, cad_pooling=cad_pooling)
         self.head = nn.Conv2d(decoder_dims[1], 1, kernel_size=3, stride=1, padding=1)
 
         self.pad_len = pad_len

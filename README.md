@@ -5,6 +5,9 @@
 首版保留原转置卷积；没有加入 DySample、Pi-Seg、FOD、DINO 或 SAM。
 借鉴机制已经实现，不代表组合的训练收益已经得到验证。
 
+全局审查后另提供 `full_selective`：保留 LSK，使用分支门控融合和类别加权 CAD。
+它是一套独立候选，原 `full` 保留为对照；设计取舍见 [DESIGN.md](DESIGN.md)。
+
 ## 1. 安装
 
 建议 Linux、Python 3.10–3.12、单卡 CUDA GPU。默认批量为 2，不能保证所有
@@ -36,6 +39,7 @@ ROI/NMS 算子，因此安装时只编译 Detectron2 CPU 扩展，训练仍在 G
 ```bash
 python tools/smoke_aggregator.py --classes 17
 python tools/smoke_aggregator.py --classes 17 --full --device cuda
+python tools/smoke_aggregator.py --classes 17 --selective --device cuda
 python tools/check_baseline_equivalence.py
 ```
 
@@ -115,6 +119,10 @@ python train_ovrs.py --dataset-manifest data/dlrsd/manifest.json \
 python train_ovrs.py --dataset-manifest data/dlrsd/manifest.json \
   --experiment full --num-gpus 1 --output output/full
 
+# 选择性融合与类别加权摘要候选
+python train_ovrs.py --dataset-manifest data/dlrsd/manifest.json \
+  --experiment full_selective --num-gpus 1 --output output/full_selective
+
 # 完整模型评测；必须匹配训练时的 experiment
 python train_ovrs.py --dataset-manifest data/dlrsd/manifest.json \
   --experiment full --num-gpus 1 --eval-only \
@@ -151,6 +159,9 @@ eval-only 另外保存 evaluation.json，包含整体、逐类与 seen/unseen mI
 | epl_cad | 并行 EPL | 无 | 第一级 |
 | full | 并行 EPL | LSK | 第一级 |
 | full_cad_both | 并行 EPL | LSK | 两级 |
+| parallel_gated | 分歧条件的两路门控融合 | 无 | 无 |
+| cad_weighted | 原串行 | 无 | 第一级，类别加权摘要 |
+| full_selective | 两路门控融合 | LSK | 第一级，类别加权摘要 |
 
 普通卷积对照不是严格的等参数/等感受野对照；要作相应机制主张需进一步匹配。
 并行版本每层只计算一次空间分支和一次类别分支，与串行计算次数相同，
@@ -167,6 +178,9 @@ eval-only 另外保存 evaluation.json，包含整体、逐类与 seen/unseen mI
 - CAD 先用原转置卷积上采样，再对真实 K 个类别的解码特征求平均，细化
   单路 CLIP guidance，然后拼接与 DoubleConv。新增细化以可学习小幅残差接入，
   初值为 0.01（MODEL.OVRS.CAD_SCALE）。没有结构教师或置信度估计。
+- `parallel_gated` 按位置与类别选择空间/类别分支，另用单个轻量残差细化，
+  不使用 EPL 专家。`CAD_POOLING: weighted` 用共享 scorer 对类别摘要加权；
+  路由与摘要权重均是学习偏好，不能当作校准后的可靠性或类别概率。
 - CAD 对类别顺序不敏感，但增删候选类别会改变共享摘要。原 class attention
   的 padding 是内部处理，送进 decoder 的是实际类别；默认超过 256 类仍沿用
   CAT-Seg 的候选截断策略，不承诺无限词汇同时参与 CAD。

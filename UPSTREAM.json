@@ -16,6 +16,8 @@
     "masked ignore-pixel BCE",
     "branch-mean residual fusion with learnable scale",
     "scaled CAD residual",
-    "strict evaluation checkpoint loading"
+    "strict evaluation checkpoint loading",
+    "optional disagreement-conditioned branch gating",
+    "optional shared-score class pooling for CAD"
   ]
 }
