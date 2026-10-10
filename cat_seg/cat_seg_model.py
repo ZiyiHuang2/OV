@@ -15,6 +15,7 @@ from detectron2.utils.memory import _ignore_torch_cuda_oom
 
 from einops import rearrange
 from .modeling.losses import masked_segmentation_bce
+from .modeling.postprocessing import postprocess_padded_prediction
 
 @META_ARCH_REGISTRY.register()
 class CATSeg(nn.Module):
@@ -168,12 +169,15 @@ class CATSeg(nn.Module):
 
         else:
             outputs = outputs.sigmoid()
-            image_size = clip_images.image_sizes[0]
-            height = batched_inputs[0].get("height", image_size[0])
-            width = batched_inputs[0].get("width", image_size[1])
-
-            output = sem_seg_postprocess(outputs[0], image_size, height, width)
-            processed_results = [{'sem_seg': output}]
+            padded_size = clip_images.tensor.shape[-2:]
+            processed_results = []
+            for prediction, image_size, record in zip(outputs, clip_images.image_sizes, batched_inputs):
+                height = record.get("height", image_size[0])
+                width = record.get("width", image_size[1])
+                output = postprocess_padded_prediction(
+                    prediction, padded_size, image_size, (height, width),
+                )
+                processed_results.append({'sem_seg': output})
             return processed_results
 
 

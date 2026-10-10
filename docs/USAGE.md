@@ -134,17 +134,42 @@ python train_ovrs.py --dataset-manifest data/dlrsd/manifest.json \
 从分割 checkpoint 初始化可添加 --weights /path/to/model.pth，各对比应使用
 相同初始化策略。新增参数没有对应权重时会随机初始化并显示缺失键；parallel
 保留原空间/类别分支的参数名，便于初始化。
+同一个 seed 不保证不同消融的共享层初始化相同：新增模块会消耗随机数。
+若要进行严格配对比较，先保存一份未训练的 baseline 初始 checkpoint，再让
+baseline 与所有变体统一用 --weights 加载这份共享权重；新增参数单独初始化。
+如果使用已经训练过的初始化权重，各组必须使用同一份，并计入相同训练协议。
+正式结果建议报告多个 seed；本仓库没有保证单次运行就能代表稳定增益。
 真正恢复训练使用相同输出目录和 --resume，它读取 last_checkpoint、优化器和
 迭代状态；--weights 单独使用不是恢复优化器。没有已有 checkpoint 的 --resume
 会报错。评测要求模型权重完整匹配，选错 experiment 或缺失模块权重会报错。
+新 checkpoint 同时保存影响模型前向的配置。评测与 --resume 会核对膨胀率、
+窗口、注意力、归一化输入、聚合方式等设置，配置不同会在加载权重前报错。
+动态类别词表、输入评测尺寸、设备和已被权重恢复的残差初值不作为结构限制。
+完整的运行配置仍会记录，改变评测尺寸或 sliding-window 属于评测协议变化。
+
+旧 checkpoint 没有配置元信息，评测或恢复时默认拒绝；确认来源后可显式加
+--allow-unverified-checkpoint。此时依然严格核对权重键和形状，但不能证明旧
+模型的计算配置一致，日志与 provenance 会标明这个选择。这个参数不能绕过
+新 checkpoint 已记录的配置冲突。从旧权重初始化一轮新训练不要求该参数。
 
 默认是 attention 微调、80k iterations、2 层聚合、batch=2、AMP、seed=42。
 这些只是可运行起点，不自动等于你的论文协议。改变批量、预算或 CLIP 策略时，
 对所有实验使用相同设置，例如 --batch-size 1 --max-iter 30000。
 标准 Detectron2 opts 放在最后，例如 SOLVER.BASE_LR 0.0001。
 
-输出包含 config.yaml、run_provenance.json、metrics.json、checkpoints。
-eval-only 另外保存 evaluation.json，包含整体、逐类与 seen/unseen mIoU。
+首次训练在输出根目录保留 config.yaml、run_provenance.json；metrics.json 和
+checkpoints 继续保存在根目录。每次运行另外创建 runs/<UTC时间_模式_ID>/，
+独立保存本次 config.yaml、run_provenance.json 和 log.txt；eval-only 的
+evaluation.json 与 inference/ 也写入本次运行目录。训练期间的周期评测
+inference/ 与累积 metrics.json 沿用原训练输出路径。评测和恢复不会覆盖最初
+的训练配置与来源记录；对已有训练目录重新启动而不加 --resume 会报错。
+默认评测输出为 output/<experiment>_eval；即使显式指定原训练目录，其根目录
+训练记录仍然保留。eval-only --resume 则从指定训练目录读取 last_checkpoint。
+
+provenance 记录当前 OV Git commit、工作区是否有未提交修改、manifest 和
+训练/评测词表的 SHA-256、类别划分与样本数。摘要核验的是 manifest 与词表，
+不包含每张图像/标注的文件内容，不能代替原始数据版本管理。
+evaluation.json 包含整体、逐类与 seen/unseen mIoU。
 没有 unseen 类别或对应类别没有有效评测像素时，相应结果是 NaN，不能解释成 0。
 
 ## 5. 消融配置
@@ -190,6 +215,10 @@ eval-only 另外保存 evaluation.json，包含整体、逐类与 seen/unseen mI
   缓存，支持训练/评测类别不同。训练时文本编码仍有梯度。
 - 所有实验统一修正 ignore 像素的 BCE。上游把这些像素作为全零目标计算
   BCE；本工程完全排除它们。因此这里的 baseline 训练不是原损失的逐字复现。
+- 非 sliding-window 评测统一修正 padding 坐标：先恢复补齐后的输入画布，
+  再裁掉 padding、恢复原图。无 padding 时直接一次插值；批量输入逐图处理。
+  旧版本在带 padding 的输入上可能产生不同指标，baseline 和各变体应统一
+  用修正后的版本重新评测，不能将这项评测修复归为模块收益。
 - 默认实验只支持 OpenAI CLIP ViT-B/16 的已检查数据流。原仓库其他入口与
   配置保留，但未作为本项目的稳定运行路径。
 

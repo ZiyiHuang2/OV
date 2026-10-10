@@ -84,3 +84,36 @@ and evaluated on the two synthetic validation images through the reorganized
 entry point. No architecture or training-objective changes were made in this
 organization pass. Archived demos and natural-image preparation scripts were
 compiled, but were not exercised with their original data/dependencies.
+
+## Evaluation and reproducibility review
+
+The current suite passes **62 tests** after adding regressions for padded
+640×853 inputs on a 640×864 canvas, unpadded small inputs, per-image batch
+geometry, equal-shaped convolution weights with different dilation, matching
+checkpoint metadata, explicit legacy opt-in, dynamic vocabularies, and
+preservation of initial records during evaluation/resume.
+
+New checkpoints contain a versioned model configuration and invocation
+provenance. Matching configurations load; a dilation conflict fails before
+parameters are applied. Initializing a new training run may still load shared
+weights from a different architecture. Strict resume checks configuration and
+weights. Vocabulary, device and evaluation input size may intentionally change;
+their current values remain in the complete run configuration. Metadata-free
+legacy checkpoints require explicit opt-in and remain configuration-unverified.
+
+The complete pretrained-CLIP `full` pipeline ran two CPU training iterations,
+saved a metadata-bearing checkpoint, restored optimizer/iteration state and
+continued from iteration 2 to iteration 3. The checkpoint was then evaluated
+on two rectangular synthetic images (111×149); the mapper's resized input
+requires padding, exercising the corrected ordinary inference path. Evaluation
+used the same output root as training. Initial `config.yaml` and
+`run_provenance.json` were checked byte-for-byte after resume and evaluation;
+each invocation has its own configuration, provenance and log under `runs/`,
+and standalone evaluation also stores its result files there. Periodic training
+evaluations and accumulated training metrics retain the normal output paths. The previous selective checkpoint also completed
+rectangular-image evaluation with explicit legacy opt-in.
+
+Neither synthetic scores nor this postprocessing correction are evidence of
+module gains. Historical real-image results with padding must be recomputed
+using the same corrected evaluator for every ablation. CUDA AMP, 4090 memory,
+real-data gains and distributed execution have not been tested in this review.

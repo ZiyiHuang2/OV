@@ -19,6 +19,9 @@ CLIP 的图像/文本表示与动态词汇缓存在 predictor 及 CATSeg 中管�
 | `cat_seg/modeling/transformer/model.py` | AggregatorLayer、Aggregator、Up | 串行/并行计算与解码阶段的接入位置 |
 | `cat_seg/modeling/transformer/cat_seg_predictor.py` | 文本编码、缓存与聚合器创建 | 动态词汇及配置参数传递 |
 | `cat_seg/engine/trainer.py` | 优化器、学习率、mapper、通用 evaluator | 训练策略 |
+| `cat_seg/engine/checkpoint.py` | 模型配置契约、保存与严格加载 | checkpoint 校验 |
+| `cat_seg/engine/records.py` | 每次运行记录、Git 与数据摘要 | 实验追溯 |
+| `cat_seg/modeling/postprocessing.py` | 预测画布恢复和 padding 裁剪 | 空间坐标处理 |
 | `train_ovrs.py` | RS evaluator、严格评测加载与命令行 | 运行协议与入口 |
 | `tools/prepare_rs_dataset.py` | 标签转换、seen/unseen 与 manifest | 新遥感数据集接入 |
 
@@ -50,11 +53,13 @@ opts，例如 `MODEL.OVRS.CAD_POOLING weighted`，实际配置会写入输出目
 继承的类别 JSON，避免改变原注册逻辑及基础配置的资源路径。模型核心和 CLIP
 代码保留在 `cat_seg/`，不需要从 archive 加载。
 
-## 本次整理的兼容边界
+## 目录整理的兼容边界
 
 `train_ovrs.py` 的 CLI、experiment 名称和 `configs/ovrs/*.yaml` 路径保持不变。
 三个模块移动到独立文件，但模型属性名、参数键、前向计算与随机初始化顺序
-保持不变，已训练权重可以按原 experiment 严格加载。
+保持不变。后续评测审查修正了 padding 后处理，未改变三个模块或权重键。
+新 checkpoint 会核对模型配置；旧权重缺少元信息，评测或恢复需显式加
+`--allow-unverified-checkpoint`，此时仅保证权重兼容。
 
 Python 模块导入位置改为 `cat_seg.modeling.modules`，通用 Trainer 导入位置改为
 `cat_seg.engine`。原 `ovrs_modules.py` 和根目录 `train_net.py` 没有保留转发包装。

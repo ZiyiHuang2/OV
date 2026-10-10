@@ -18,6 +18,9 @@
     "scaled CAD residual",
     "strict evaluation checkpoint loading",
     "optional disagreement-conditioned branch gating",
-    "optional shared-score class pooling for CAD"
+    "optional shared-score class pooling for CAD",
+    "padding-aware prediction postprocessing",
+    "model-configuration checkpoint contract",
+    "append-only invocation records with repository and dataset digests"
   ]
 }

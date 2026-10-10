@@ -37,6 +37,10 @@ python train_ovrs.py --dataset-manifest data/dlrsd/manifest.json \
 [运行指南](docs/USAGE.md)。默认批量为 2；4090 实际显存需要测量，必要时
 对所有对比统一指定 `--batch-size 1`。
 
+新 checkpoint 保存并校验关键模型配置；旧权重评测/恢复需显式加
+`--allow-unverified-checkpoint`。每次运行的日志及独立评测结果保存在输出目录的
+`runs/<运行ID>/` 中，原训练记录不会被评测或恢复覆盖。
+
 ## 三个模块在哪里
 
 | 模块 | 实现位置 | 接入方式 |
