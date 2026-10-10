@@ -1,0 +1,5 @@
+_BASE_: base.yaml
+MODEL:
+  OVRS:
+    AGGREGATION: parallel_epl
+    CAD_STAGES: [1]

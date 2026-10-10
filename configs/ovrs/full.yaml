@@ -1,0 +1,6 @@
+_BASE_: base.yaml
+MODEL:
+  OVRS:
+    AGGREGATION: parallel_epl
+    CONTEXT_ADAPTER: lsk
+    CAD_STAGES: [1]

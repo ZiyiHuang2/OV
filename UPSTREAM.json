@@ -1,0 +1,21 @@
+{
+  "cat_seg": {
+    "repository": "https://github.com/cvlab-kaist/CAT-Seg",
+    "commit": "6d3a188af95165147fe2f34a8237fa7d2633e784"
+  },
+  "detectron2": {
+    "repository": "https://github.com/facebookresearch/detectron2",
+    "commit": "1e3e13bbf607b54f62205c4c33922521822fb298"
+  },
+  "adaptations": [
+    "LSK shared guidance",
+    "single-round parallel aggregation",
+    "EPL-inspired fusion with GroupNorm",
+    "single-stream CAD",
+    "vocabulary-keyed text caches",
+    "masked ignore-pixel BCE",
+    "branch-mean residual fusion with learnable scale",
+    "scaled CAD residual",
+    "strict evaluation checkpoint loading"
+  ]
+}

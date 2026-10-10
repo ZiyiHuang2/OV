@@ -1,0 +1,4 @@
+_BASE_: full.yaml
+MODEL:
+  OVRS:
+    CAD_STAGES: [1, 2]
