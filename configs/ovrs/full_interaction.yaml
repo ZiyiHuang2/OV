@@ -1,0 +1,5 @@
+_BASE_: interaction_decoder.yaml
+MODEL:
+  OVRS:
+    CONTEXT_ADAPTER: cost_lsk
+    AGGREGATION: parallel_interaction

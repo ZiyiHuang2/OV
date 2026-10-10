@@ -28,3 +28,4 @@ jobs:
       - run: python tools/smoke_aggregator.py --classes 17 --full --cad-scope per_class
       - run: python tools/smoke_aggregator.py --classes 17 --full --epl-routing uniform --cad-scope per_class
       - run: python tools/probe_module_cost.py
+      - run: python tools/smoke_aggregator.py --classes 17 --interaction

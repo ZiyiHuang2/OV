@@ -52,6 +52,7 @@ class CATSegPredictor(nn.Module):
         cad_pooling: str = 'mean',
         epl_routing: str = 'learned',
         cad_scope: str = 'shared',
+        cad_mode: str = 'residual',
     ):
         """
         Args:
@@ -129,6 +130,7 @@ class CATSegPredictor(nn.Module):
             cad_pooling=cad_pooling,
             epl_routing=epl_routing,
             cad_scope=cad_scope,
+            cad_mode=cad_mode,
             )
         self.transformer = transformer
         
@@ -175,6 +177,7 @@ class CATSegPredictor(nn.Module):
         ret['cad_pooling'] = cfg.MODEL.OVRS.CAD_POOLING
         ret['epl_routing'] = cfg.MODEL.OVRS.EPL_ROUTING
         ret['cad_scope'] = cfg.MODEL.OVRS.CAD_SCOPE
+        ret['cad_mode'] = cfg.MODEL.OVRS.CAD_MODE
 
         return ret
 

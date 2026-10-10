@@ -105,3 +105,4 @@ def add_cat_seg_config(cfg):
     cfg.MODEL.OVRS.CAD_SCALE = 0.01
     cfg.MODEL.OVRS.CAD_POOLING = 'mean'
     cfg.MODEL.OVRS.CAD_SCOPE = 'shared'
+    cfg.MODEL.OVRS.CAD_MODE = 'residual'

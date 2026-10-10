@@ -1,0 +1,4 @@
+_BASE_: base.yaml
+MODEL:
+  OVRS:
+    CONTEXT_ADAPTER: cost_lsk
