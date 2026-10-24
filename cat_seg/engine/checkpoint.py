@@ -39,6 +39,13 @@ def model_config(cfg):
             keys += ('MODEL.OVRS.CAD_SCOPE',)
         if cfg.MODEL.OVRS.CAD_MODE != 'residual':
             keys += ('MODEL.OVRS.CAD_MODE',)
+    if cfg.MODEL.OVRS.CRTV.ENABLED:
+        keys += (
+            'MODEL.OVRS.CRTV.ENABLED',
+            'MODEL.OVRS.CRTV.RELATION_TEMPERATURE',
+            'MODEL.OVRS.CRTV.MARGIN_TEMPERATURE',
+            'MODEL.OVRS.CRTV.TOPK',
+        )
     result = {}
     for key in keys:
         value = cfg

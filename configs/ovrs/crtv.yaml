@@ -1,0 +1,11 @@
+_BASE_: baseline.yaml
+MODEL:
+  OVRS:
+    CRTV:
+      ENABLED: true
+      # Keep zero for the first trainable pilot; use a non-zero value only for
+      # an explicit inference-time diagnostic against the baseline.
+      RESIDUAL_SCALE: 0.0
+      RELATION_TEMPERATURE: 0.07
+      MARGIN_TEMPERATURE: 0.10
+      TOPK: 0

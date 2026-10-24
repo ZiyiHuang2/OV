@@ -53,6 +53,11 @@ class CATSegPredictor(nn.Module):
         epl_routing: str = 'learned',
         cad_scope: str = 'shared',
         cad_mode: str = 'residual',
+        crtv_enabled: bool = False,
+        crtv_relation_temperature: float = 0.07,
+        crtv_margin_temperature: float = 0.10,
+        crtv_residual_scale: float = 0.0,
+        crtv_topk: int = 0,
     ):
         """
         Args:
@@ -131,6 +136,11 @@ class CATSegPredictor(nn.Module):
             epl_routing=epl_routing,
             cad_scope=cad_scope,
             cad_mode=cad_mode,
+            crtv_enabled=crtv_enabled,
+            crtv_relation_temperature=crtv_relation_temperature,
+            crtv_margin_temperature=crtv_margin_temperature,
+            crtv_residual_scale=crtv_residual_scale,
+            crtv_topk=crtv_topk,
             )
         self.transformer = transformer
         
@@ -178,6 +188,11 @@ class CATSegPredictor(nn.Module):
         ret['epl_routing'] = cfg.MODEL.OVRS.EPL_ROUTING
         ret['cad_scope'] = cfg.MODEL.OVRS.CAD_SCOPE
         ret['cad_mode'] = cfg.MODEL.OVRS.CAD_MODE
+        ret['crtv_enabled'] = cfg.MODEL.OVRS.CRTV.ENABLED
+        ret['crtv_relation_temperature'] = cfg.MODEL.OVRS.CRTV.RELATION_TEMPERATURE
+        ret['crtv_margin_temperature'] = cfg.MODEL.OVRS.CRTV.MARGIN_TEMPERATURE
+        ret['crtv_residual_scale'] = cfg.MODEL.OVRS.CRTV.RESIDUAL_SCALE
+        ret['crtv_topk'] = cfg.MODEL.OVRS.CRTV.TOPK
 
         return ret
 

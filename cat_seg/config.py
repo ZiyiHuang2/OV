@@ -106,3 +106,11 @@ def add_cat_seg_config(cfg):
     cfg.MODEL.OVRS.CAD_POOLING = 'mean'
     cfg.MODEL.OVRS.CAD_SCOPE = 'shared'
     cfg.MODEL.OVRS.CAD_MODE = 'residual'
+
+    # Optional CRTV pilot. Disabled by default to preserve baseline behavior.
+    cfg.MODEL.OVRS.CRTV = CN()
+    cfg.MODEL.OVRS.CRTV.ENABLED = False
+    cfg.MODEL.OVRS.CRTV.RELATION_TEMPERATURE = 0.07
+    cfg.MODEL.OVRS.CRTV.MARGIN_TEMPERATURE = 0.10
+    cfg.MODEL.OVRS.CRTV.RESIDUAL_SCALE = 0.0
+    cfg.MODEL.OVRS.CRTV.TOPK = 0

@@ -16,6 +16,7 @@ from ..modules import (
     LSKGuidanceAdapter, ConvGuidanceAdapter, ParallelFusion, CostGuidanceRefiner,
     ClassGuidanceRefiner,
     CostConditionedGuidance, InteractionFusion, JointAffinityDecoder,
+    CounterfactualEvidenceVerifier,
 )
 
 # Modified Swin Transformer blocks for guidance implementetion
@@ -653,6 +654,11 @@ class Aggregator(nn.Module):
         epl_routing='learned',
         cad_scope='shared',
         cad_mode='residual',
+        crtv_enabled=False,
+        crtv_relation_temperature=0.07,
+        crtv_margin_temperature=0.10,
+        crtv_residual_scale=0.0,
+        crtv_topk=0,
     ) -> None:
         """
         Cost Aggregation Model for CAT-Seg
@@ -745,6 +751,13 @@ class Aggregator(nn.Module):
         self.head = nn.Conv2d(decoder_dims[1], 1, kernel_size=3, stride=1, padding=1)
 
         self.pad_len = pad_len
+        self.crtv = CounterfactualEvidenceVerifier(
+            temperature=crtv_relation_temperature,
+            margin_temperature=crtv_margin_temperature,
+            residual_scale=crtv_residual_scale,
+            topk=crtv_topk,
+        ) if crtv_enabled else None
+        self.last_crtv_diagnostics = None
 
     def feature_map(self, img_feats, text_feats):
         # concatenated feature volume for feature aggregation baselines
@@ -801,6 +814,10 @@ class Aggregator(nn.Module):
         classes = None
 
         corr = self.correlation(img_feats, text_feats)
+        if self.crtv is not None:
+            corr, self.last_crtv_diagnostics = self.crtv(corr, text_feats)
+        else:
+            self.last_crtv_diagnostics = None
         if self.pad_len > 0 and text_feats.size(1) > self.pad_len:
             avg = corr.permute(0, 2, 1, 3, 4).flatten(-3).max(dim=-1)[0] 
             classes = avg.topk(self.pad_len, dim=-1, sorted=False)[1]
