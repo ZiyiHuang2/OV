@@ -39,6 +39,9 @@ def main():
     for step in range(a.steps):
         indices = torch.randint(len(v), (min(a.batch_size, len(v)),))
         target = labels[indices].to(a.device)
+        if not (target != 255).any():
+            print({"step": step + 1, "skipped": "all_ignore"}, flush=True)
+            continue
         y = model(v[indices].to(a.device), t, valid,
                   [s[indices].to(a.device) for s in structures], target.shape[-2:])
         loss = segmentation_loss(y, target)

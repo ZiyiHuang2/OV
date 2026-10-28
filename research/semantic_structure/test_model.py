@@ -1,4 +1,8 @@
 import unittest
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 import torch
 from model import SemanticStructureDecoder, segmentation_loss
 
@@ -50,6 +54,36 @@ class Contracts(unittest.TestCase):
                 loss = segmentation_loss(y, torch.full_like(target, 255))
                 self.assertEqual(loss.item(), 0)
                 loss.backward()
+
+    def test_all_ignore_batch_skips_optimizer_step(self):
+        # A mixed cache can sample only ignored labels on a particular step.
+        seed = None
+        for candidate in range(20):
+            torch.manual_seed(candidate)
+            initial = SemanticStructureDecoder(8, [5])
+            if torch.randint(2, (1,)).item() == 0:
+                seed = candidate
+                break
+        self.assertIsNotNone(seed)
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "cache.pt"
+            output = Path(directory) / "output.pt"
+            labels = torch.zeros(2, 3, 4, dtype=torch.long)
+            labels[0] = 255
+            torch.save({"visual": torch.randn(2, 8, 3, 4),
+                        "text": torch.randn(2, 1, 8),
+                        "valid": torch.ones(2, 1, dtype=torch.bool),
+                        "structures": [torch.randn(2, 5, 3, 4)],
+                        "labels": labels, "metadata": {}}, cache)
+            result = subprocess.run([sys.executable, str(Path(__file__).with_name("train_cached.py")),
+                                     "--cache", str(cache), "--output", str(output),
+                                     "--steps", "1", "--batch-size", "1", "--seed", str(seed)],
+                                    check=True, capture_output=True, text=True)
+            self.assertIn("all_ignore", result.stdout)
+            saved = torch.load(output, map_location="cpu", weights_only=True)
+            for key, value in initial.state_dict().items():
+                torch.testing.assert_close(saved["model"][key], value, rtol=0, atol=0)
+            self.assertEqual(len(saved["optimizer"]["state"]), 0)
 
 if __name__ == "__main__":
     unittest.main()

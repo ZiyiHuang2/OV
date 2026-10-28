@@ -26,7 +26,7 @@ Cache is a trusted torch weights-only dictionary:
 - labels: long B,Hout,Wout, contiguous IDs 0..K-1; ignored pixels 255.
 - metadata: plain dictionary recording image IDs, split, encoder checkpoint SHA256, preprocessing, class names, descriptions and provenance.
 
-Training cache must contain training images only. This small runner loads the cache into memory; it is intended for integration pilots, not full-scale 80k training. Random minibatches use cached views; they do not reproduce image augmentation. Encoder extraction, full dataset loader, official HG checkpoint migration, distributed training and dataset evaluation remain outstanding integration work. Never substitute random features for pretrained features in reported experiments.
+Training cache must contain training images only. This small runner loads the cache into memory; it is intended for integration pilots, not full-scale 80k training. Random minibatches use cached views; they do not reproduce image augmentation. A sampled all-ignore batch is skipped without an optimizer step; `--steps` counts sampled batches, not necessarily optimizer updates. Encoder extraction, full dataset loader, official HG checkpoint migration, distributed training and dataset evaluation remain outstanding integration work. Never substitute random features for pretrained features in reported experiments.
 
 ## Research gates
 1. Verify real CLIP alignment and structure feature normalization, checkpoint identity and spatial correspondence.
