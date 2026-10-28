@@ -20,7 +20,7 @@ class GPUContracts(unittest.TestCase):
             target[:, 0] = 255
             outputs = []
             for semantic in ('mean', 'adaptive'):
-                for spatial in ('fusion', 'transport'):
+                for spatial in ('geometry', 'conditioned'):
                     torch.manual_seed(42)
                     model = SemanticStructureDecoder(8, [5, 6], 4, semantic, spatial).cuda()
                     output = model(visual, text, valid, structures, target.shape[-2:])
@@ -28,8 +28,7 @@ class GPUContracts(unittest.TestCase):
                     loss = segmentation_loss(output, target)
                     loss.backward()
                     for name, parameter in model.named_parameters():
-                        active = not ((name == 'log_temperature' and semantic == 'mean') or
-                                      (name == 'semantic_strength' and spatial == 'fusion'))
+                        active = True
                         self.assertEqual(parameter.grad is not None, active, name)
                         if active:
                             self.assertTrue(torch.isfinite(parameter.grad).all(), name)

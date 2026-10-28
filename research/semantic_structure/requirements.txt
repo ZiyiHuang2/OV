@@ -1,0 +1,7 @@
+# Install a matching torch/torchvision CPU or CUDA pair for your server.
+torch>=2.2
+torchvision>=0.17
+numpy
+Pillow>=9.1
+ftfy
+regex

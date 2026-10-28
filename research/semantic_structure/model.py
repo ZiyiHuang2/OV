@@ -1,60 +1,64 @@
-"""Experimental feature decoder; not an official reproduction of the three papers."""
+"""Version 2: controlled feature-decoder interventions, not an HG reproduction."""
 import torch
 from torch import nn
 from torch.nn import functional as F
 
+MODEL_VERSION = 2
+
 class SemanticStructureDecoder(nn.Module):
-    """Inputs: aligned CLIP BCHW, text KPD, valid KP, structure list BCHW.
-    Structure pyramid must be ordered coarse-to-fine. Encoders are external.
-    Parameters are shared across classes; no learned class-ID embeddings.
-    """
-    def __init__(self, clip_dim, structure_dims, width=64,
-                 semantic_mode="adaptive", spatial_mode="transport"):
+    def __init__(self, clip_dim, structure_dims, width=64, semantic_mode='mean',
+                 spatial_mode='geometry', temperature=0.1, semantic_strength=1.0):
         super().__init__()
-        if semantic_mode not in {"mean", "adaptive"}:
-            raise ValueError("semantic_mode must be mean or adaptive")
-        if spatial_mode not in {"fusion", "transport"}:
-            raise ValueError("spatial_mode must be fusion or transport")
-        if not structure_dims:
-            raise ValueError("structure pyramid must not be empty")
+        if semantic_mode not in {'mean', 'adaptive'}:
+            raise ValueError('semantic_mode: mean or adaptive')
+        if spatial_mode not in {'identity', 'geometry', 'conditioned'}:
+            raise ValueError('spatial_mode: identity, geometry or conditioned; v1 names are unsupported')
+        if not structure_dims or min(clip_dim, width, *structure_dims) < 1:
+            raise ValueError('Positive dimensions and a nonempty structure pyramid required')
+        if not 0 < temperature < float('inf') or not 0 <= semantic_strength < float('inf'):
+            raise ValueError('Invalid fixed intervention coefficients')
+        self.config = dict(clip_dim=clip_dim, structure_dims=list(structure_dims), width=width,
+                           semantic_mode=semantic_mode, spatial_mode=spatial_mode,
+                           temperature=temperature, semantic_strength=semantic_strength)
         self.semantic_mode, self.spatial_mode = semantic_mode, spatial_mode
+        self.temperature, self.semantic_strength = temperature, semantic_strength
+        # All arms have exactly the same learnable parameters and initialization order.
         self.evidence = nn.Conv2d(clip_dim, width, 1)
         self.structure = nn.ModuleList(nn.Conv2d(d, width, 1) for d in structure_dims)
-        self.refine = nn.ModuleList(nn.Sequential(
-            nn.Conv2d(3 * width, width, 3, padding=1), nn.GELU(),
-            nn.Conv2d(width, width, 3, padding=1)) for _ in structure_dims)
+        self.refine = nn.ModuleList(nn.Sequential(nn.Conv2d(4*width, width, 3, padding=1),
+            nn.GELU(), nn.Conv2d(width, width, 3, padding=1)) for _ in structure_dims)
         self.head = nn.Conv2d(width, 1, 1)
-        self.log_temperature = nn.Parameter(torch.tensor(0.0))
-        self.semantic_strength = nn.Parameter(torch.tensor(0.0))
+
+    def selected_text(self, visual, descriptors):
+        if self.semantic_mode == 'mean':
+            selected = descriptors.mean(0)[None, :, None, None]
+        else:
+            scores = torch.einsum('bdhw,pd->bphw', visual, descriptors)
+            weights = (scores / self.temperature).softmax(1)
+            selected = torch.einsum('bphw,pd->bdhw', weights, descriptors)
+        # Identical normalization removes the former magnitude confound.
+        return F.normalize(selected, dim=1)
 
     def build_evidence(self, visual, text, valid):
         if visual.ndim != 4 or text.ndim != 3 or valid.shape != text.shape[:2]:
-            raise ValueError("Expected BCHW, KPD, KP")
-        if visual.shape[1] != text.shape[-1] or valid.dtype != torch.bool:
-            raise ValueError("Aligned dimensions and boolean validity mask required")
-        if text.shape[0] == 0 or text.shape[1] == 0:
-            raise ValueError("Vocabulary and descriptions must not be empty")
+            raise ValueError('Expected visual BCHW, text KPD, valid KP')
+        if visual.shape[1] != text.shape[-1] or valid.dtype != torch.bool or len(text) == 0:
+            raise ValueError('Invalid aligned dimensions, mask or empty vocabulary')
         if not valid.any(-1).all():
-            raise ValueError("Each class needs at least one valid description")
-        if not torch.isfinite(visual).all() or not torch.isfinite(text).all():
-            raise ValueError("Nonfinite input")
+            raise ValueError('Each class needs at least one valid description')
+        if not torch.isfinite(visual).all() or not torch.isfinite(text[valid]).all():
+            raise ValueError('Nonfinite valid input')
         v = F.normalize(visual.float(), dim=1)
-        t = F.normalize(text.float(), dim=-1)
         outputs = []
-        # Class loop avoids materializing B*K*P*D*H*W.
-        for descriptions, mask in zip(t, valid):
-            descriptors = descriptions[mask]
-            if self.semantic_mode == "mean":
-                selected = F.normalize(descriptors.mean(0), dim=0)[None, :, None, None]
-            else:
-                scores = torch.einsum("bdhw,pd->bphw", v, descriptors)
-                temperature = self.log_temperature.exp().clamp(0.05, 20)
-                weights = (scores / temperature).softmax(1)
-                selected = torch.einsum("bphw,pd->bdhw", weights, descriptors)
+        for descriptions, mask in zip(text, valid):
+            t = F.normalize(descriptions[mask].float(), dim=-1)
+            selected = self.selected_text(v, t)
             outputs.append(self.evidence((v * selected).to(visual.dtype)))
         return torch.stack(outputs, dim=1)
 
     def transport(self, h, geometry, evidence):
+        if self.spatial_mode == 'identity':
+            return h
         b, k, d, height, width = h.shape
         n = height * width
         g = F.normalize(geometry.float(), dim=1)
@@ -63,11 +67,13 @@ class SemanticStructureDecoder(nn.Module):
         boundary = F.unfold(torch.ones_like(g[:, :1]), 3, padding=1).bool()
         result = []
         for c in range(k):
-            e = F.normalize(evidence[:, c].float(), dim=1)
-            en = F.unfold(e, 3, padding=1).reshape(b, d, 9, n)
-            semantic = (e.flatten(2).unsqueeze(2) * en).sum(1)
-            scores = affinity + self.semantic_strength.sigmoid() * semantic
-            weights = scores.masked_fill(~boundary, float("-inf")).softmax(1)
+            scores = affinity
+            if self.spatial_mode == 'conditioned':
+                e = F.normalize(evidence[:, c].float(), dim=1)
+                en = F.unfold(e, 3, padding=1).reshape(b, d, 9, n)
+                semantic = (e.flatten(2).unsqueeze(2) * en).sum(1)
+                scores = scores + self.semantic_strength * semantic
+            weights = scores.masked_fill(~boundary, float('-inf')).softmax(1)
             neighbors = F.unfold(h[:, c], 3, padding=1).reshape(b, d, 9, n)
             result.append((neighbors * weights[:, None].to(h.dtype)).sum(2)
                           .reshape(b, d, height, width))
@@ -75,45 +81,55 @@ class SemanticStructureDecoder(nn.Module):
 
     def forward(self, visual, text, valid, structures, output_size=None):
         if len(structures) != len(self.structure):
-            raise ValueError("Wrong number of structure levels")
+            raise ValueError('Wrong number of structure levels')
         evidence = self.build_evidence(visual, text, valid)
         b, k, d, _, _ = evidence.shape
         state = evidence.flatten(0, 1)
         previous_size = (0, 0)
         for features, projection, refine in zip(structures, self.structure, self.refine):
-            if features.ndim != 4 or features.shape[0] != b:
-                raise ValueError("Invalid structure batch")
-            if not torch.isfinite(features).all():
-                raise ValueError("Nonfinite structure features")
+            if features.ndim != 4 or features.shape[0] != b or not torch.isfinite(features).all():
+                raise ValueError('Invalid structure features')
             size = features.shape[-2:]
             if any(a < z for a, z in zip(size, previous_size)):
-                raise ValueError("Structure levels must be coarse-to-fine")
+                raise ValueError('Structure levels must be coarse-to-fine')
             previous_size = size
-            state = F.interpolate(state, size=size, mode="bilinear", align_corners=False)
-            direct = F.interpolate(evidence.flatten(0, 1), size=size,
-                                   mode="bilinear", align_corners=False)
+            state = F.interpolate(state, size=size, mode='bilinear', align_corners=False)
+            direct = F.interpolate(evidence.flatten(0, 1), size=size, mode='bilinear', align_corners=False)
             geometry = projection(features)
-            if self.spatial_mode == "transport":
-                guided = self.transport(state.reshape(b, k, d, *size), geometry,
-                                        direct.reshape(b, k, d, *size)).flatten(0, 1)
-            else:
-                guided = geometry[:, None].expand(-1, k, -1, -1, -1).reshape(b*k, d, *size)
-            state = state + refine(torch.cat((state, direct, guided), dim=1))
+            guided = self.transport(state.reshape(b, k, d, *size), geometry,
+                                    direct.reshape(b, k, d, *size)).flatten(0, 1)
+            # Keep the SAME direct structure and evidence paths in all arms.
+            shared = geometry[:, None].expand(-1, k, -1, -1, -1).reshape(b*k, d, *size)
+            state = state + refine(torch.cat((state, direct, shared, guided), dim=1))
         logits = self.head(state).reshape(b, k, *previous_size)
         if output_size is not None:
-            logits = F.interpolate(logits, size=output_size, mode="bilinear", align_corners=False)
+            logits = F.interpolate(logits, size=output_size, mode='bilinear', align_corners=False)
         return logits
 
+
 def segmentation_loss(logits, labels, ignore_index=255):
-    """All-ignore batches have a finite zero loss and zero direct gradient."""
     if logits.ndim != 4 or labels.dtype != torch.long or labels.shape != (logits.shape[0], *logits.shape[-2:]):
-        raise ValueError("Expected BCHW logits and long BHW labels on the same grid")
+        raise ValueError('Expected BCHW logits and long BHW labels on the same grid')
     valid = labels != ignore_index
     if ((labels[valid] < 0) | (labels[valid] >= logits.shape[1])).any():
-        raise ValueError("Label outside vocabulary")
+        raise ValueError('Label outside vocabulary')
     if not valid.any():
         return logits.sum() * 0
-    # The 2D NLL CUDA kernel is nondeterministic in PyTorch 2.5. Flatten
-    # pixels so strict deterministic training uses the ordinary NLL kernel.
+    # NLL2d CUDA is nondeterministic in PyTorch 2.5; use the pixel-flat kernel.
     return F.cross_entropy(logits.permute(0, 2, 3, 1).reshape(-1, logits.shape[1]),
                            labels.reshape(-1), ignore_index=ignore_index)
+
+
+def optimization_step(model, optimizer, visual, text, valid, structures, labels):
+    # Even zero gradients can cause AdamW decay/momentum updates: skip the entire step.
+    optimizer.zero_grad(set_to_none=True)
+    if not (labels != 255).any():
+        return None
+    logits = model(visual, text, valid, structures, labels.shape[-2:])
+    loss = segmentation_loss(logits, labels)
+    if not torch.isfinite(loss):
+        raise RuntimeError('Nonfinite loss')
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
+    optimizer.step()
+    return float(loss.detach())
