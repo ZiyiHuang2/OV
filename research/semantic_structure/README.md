@@ -24,7 +24,7 @@ cd research/semantic_structure
 python -m unittest -v test_model test_extract
 ```
 
-本次实际验收环境为 Python 3.12、torch 2.14.1+cpu、torchvision 0.29.1+cpu。requirements 给的是接口最低范围，不代表所有旧版本均经过测试。GPU 未在本次环境运行；先执行小预算服务器验收。
+上游 v2 最初的验收环境是 Python 3.12、torch 2.14.1+cpu、torchvision 0.29.1+cpu。服务器后续已完成 CUDA 测试和真实数据训练，详见 [服务器执行报告](EXECUTION_V2_20261028.md)。requirements 给的是接口最低范围，不代表所有旧版本均经过测试。
 
 ## 从真实图像提取缓存
 
@@ -104,7 +104,7 @@ python evaluate.py --checkpoint /experiments/ss_v2_spatial/baseline/final.pt \
 
 ## 当前证据边界
 
-本次通过的测试覆盖合成特征、临时图像/合成编码器权重、真实 PyTorch 优化、续训和文件读写。没有本地真实遥感数据、预训练权重或 CUDA，因此没有真实数据集成绩、冻结预训练编码器表现或 GPU 资源结论。服务器下一步是用真实权重和小型数据清单验收，再决定是否执行一条匹配 pilot。
+原上游验收覆盖合成特征、临时图像/合成编码器权重、真实 PyTorch 优化、续训和文件读写。后续服务器已完成真实冻结特征接入、四组工程验收及 DLRSD seen-only 单种子匹配训练；具体身份、结果和限制见 [服务器执行报告](EXECUTION_V2_20261028.md)。
 
 独立原型的收益不能证明旧 DLRSD unseen 退化的根因，也不能证明改进了 HG。要研究 HG，仍需其官方实现、权重和匹配协议；不要因为此目录已存在就默认扩展模型。
 
@@ -151,5 +151,5 @@ GPUs are available before invoking it. Protocol, launches, logs, final/latest
 checkpoints, periodic per-image/per-class/confusion metrics, and matched-control
 checks remain under the independent experiment directory. This is cached,
 single-seed, single-dataset seen-only evidence, not end-to-end training or a
-cross-dataset open-vocabulary result. See EXECUTION_V2_20261028.md for measured
-server results once the run completes.
+cross-dataset open-vocabulary result. See [EXECUTION_V2_20261028.md](EXECUTION_V2_20261028.md) for measured
+server results and limitations.

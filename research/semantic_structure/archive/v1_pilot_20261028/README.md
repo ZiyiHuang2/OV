@@ -1,5 +1,7 @@
 # Semantic–structure research prototype
 
+Historical v1 delivery documentation; subsequent real-data engineering results are in [EXECUTION_20261028.md](EXECUTION_20261028.md). The original implementation and this README are retained for reproducibility.
+
 Status: feature-level experimental decoder, NOT an HG reproduction or a validated segmentation method.
 No trained weights or measured dataset gains are included. Existing CAT-Seg training remains unchanged.
 
