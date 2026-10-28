@@ -85,5 +85,43 @@ class Contracts(unittest.TestCase):
                 torch.testing.assert_close(saved["model"][key], value, rtol=0, atol=0)
             self.assertEqual(len(saved["optimizer"]["state"]), 0)
 
+    def test_loss_matches_pixel_cross_entropy(self):
+        logits = torch.randn(2, 3, 4, 7, requires_grad=True)
+        labels = torch.randint(0, 3, (2, 4, 7)); labels[0, 0] = 255
+        actual = segmentation_loss(logits, labels)
+        reference = torch.nn.functional.cross_entropy(logits, labels, ignore_index=255)
+        torch.testing.assert_close(actual, reference)
+        torch.testing.assert_close(torch.autograd.grad(actual, logits, retain_graph=True)[0],
+                                   torch.autograd.grad(reference, logits)[0])
+        for bad in (labels.float(), labels[:, :2], torch.full_like(labels, 3)):
+            with self.assertRaises(ValueError):
+                segmentation_loss(logits, bad)
+
+    def test_empty_vocabulary_and_nonfinite_structure(self):
+        with self.assertRaises(ValueError):
+            self.m(self.v, self.t[:0], self.valid[:0], self.s)
+        bad = [x.clone() for x in self.s]; bad[0][0, 0, 0, 0] = float('nan')
+        with self.assertRaises(ValueError):
+            self.m(self.v, self.t, self.valid, bad)
+
+    def test_pilot_confusion_metrics(self):
+        from run_pilot import confusion, scores
+        logits = torch.tensor([[[[2., 0., 2., 0.]], [[0., 2., 0., 2.]]]])
+        labels = torch.tensor([[[0, 0, 1, 255]]])
+        cm = confusion(logits, labels, 2)
+        self.assertEqual(cm.tolist(), [[1, 1], [1, 0]])
+        report = scores(cm)
+        self.assertEqual(report['per_class_iou'], [1 / 3, 0.0])
+        self.assertEqual(report['per_class_precision'], [0.5, 0.0])
+        self.assertEqual(report['per_class_recall'], [0.5, 0.0])
+        self.assertAlmostEqual(report['miou'], 1 / 6)
+
+    def test_exact_description_deduplication(self):
+        from extract_dlrsd import deduplicate_descriptions
+        self.assertEqual(deduplicate_descriptions([['a', 'b', 'a'], ['c']]), [['a', 'b'], ['c']])
+        for rows in ([[]], [['']]):
+            with self.assertRaises(ValueError):
+                deduplicate_descriptions(rows)
+
 if __name__ == "__main__":
     unittest.main()

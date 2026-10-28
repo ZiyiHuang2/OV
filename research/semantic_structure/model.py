@@ -32,6 +32,8 @@ class SemanticStructureDecoder(nn.Module):
             raise ValueError("Expected BCHW, KPD, KP")
         if visual.shape[1] != text.shape[-1] or valid.dtype != torch.bool:
             raise ValueError("Aligned dimensions and boolean validity mask required")
+        if text.shape[0] == 0 or text.shape[1] == 0:
+            raise ValueError("Vocabulary and descriptions must not be empty")
         if not valid.any(-1).all():
             raise ValueError("Each class needs at least one valid description")
         if not torch.isfinite(visual).all() or not torch.isfinite(text).all():
@@ -81,6 +83,8 @@ class SemanticStructureDecoder(nn.Module):
         for features, projection, refine in zip(structures, self.structure, self.refine):
             if features.ndim != 4 or features.shape[0] != b:
                 raise ValueError("Invalid structure batch")
+            if not torch.isfinite(features).all():
+                raise ValueError("Nonfinite structure features")
             size = features.shape[-2:]
             if any(a < z for a, z in zip(size, previous_size)):
                 raise ValueError("Structure levels must be coarse-to-fine")
@@ -102,7 +106,14 @@ class SemanticStructureDecoder(nn.Module):
 
 def segmentation_loss(logits, labels, ignore_index=255):
     """All-ignore batches have a finite zero loss and zero direct gradient."""
+    if logits.ndim != 4 or labels.dtype != torch.long or labels.shape != (logits.shape[0], *logits.shape[-2:]):
+        raise ValueError("Expected BCHW logits and long BHW labels on the same grid")
     valid = labels != ignore_index
+    if ((labels[valid] < 0) | (labels[valid] >= logits.shape[1])).any():
+        raise ValueError("Label outside vocabulary")
     if not valid.any():
         return logits.sum() * 0
-    return F.cross_entropy(logits, labels, ignore_index=ignore_index)
+    # The 2D NLL CUDA kernel is nondeterministic in PyTorch 2.5. Flatten
+    # pixels so strict deterministic training uses the ordinary NLL kernel.
+    return F.cross_entropy(logits.permute(0, 2, 3, 1).reshape(-1, logits.shape[1]),
+                           labels.reshape(-1), ignore_index=ignore_index)
