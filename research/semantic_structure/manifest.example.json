@@ -1,0 +1,10 @@
+{
+  "dataset": "REPLACE_WITH_SOURCE_DATASET",
+  "split": "train",
+  "classes": [
+    {"name": "building", "descriptions": ["an aerial image of a building", "a building viewed from above"]},
+    {"name": "water", "descriptions": ["an aerial image of water"]}
+  ],
+  "label_map": {"0": 255, "1": 0, "2": 1},
+  "samples": [{"id": "REPLACE_WITH_IMAGE_ID", "image": "images/example.png", "mask": "masks/example.png"}]
+}

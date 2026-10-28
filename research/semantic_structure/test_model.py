@@ -1,89 +1,156 @@
-import unittest
-import subprocess
-import sys
-import tempfile
+"""Synthetic contracts only: these tests do not establish pretrained performance."""
+import copy
+import hashlib
+import json
 from pathlib import Path
+import tempfile
+import unittest
 import torch
-from model import SemanticStructureDecoder, segmentation_loss
+from model import SemanticStructureDecoder, optimization_step
+from data import load_cache, check_compatible, write_json
+from evaluate import confusion, metrics, evaluate
+from train_cached import run, parser
 
-class Contracts(unittest.TestCase):
+
+def fixture(split='train'):
+    generator = torch.Generator().manual_seed(19)
+    def rand(*shape):
+        return torch.randn(*shape, generator=generator)
+    y = torch.randint(0, 3, (3,6,8), generator=generator)
+    y[0] = 255
+    return {'visual':rand(3,8,3,4), 'text':rand(3,2,8), 'valid':torch.tensor([[1,1],[1,0],[1,1]],dtype=torch.bool),
+        'structures':[rand(3,5,3,4),rand(3,6,6,8)], 'labels':y,
+        'metadata':{'schema_version':2,'dataset':'SYNTHETIC_ENGINEERING_ONLY','split':split,
+            'sample_ids':[split+str(i) for i in range(3)],
+            'image_sha256':[hashlib.sha256((split+str(i)).encode()).hexdigest() for i in range(3)],
+            'class_names':['a','b','c'], 'descriptions':[['a1','a2'],['b1'],['c1','c2']],
+            'encoders':{'source':'synthetic fixture, no pretrained encoder'},'preprocessing':{'type':'synthetic'}}}
+
+class ModelContracts(unittest.TestCase):
     def setUp(self):
-        torch.manual_seed(7)
+        torch.manual_seed(7); torch.set_num_threads(1)
+        self.data = fixture()
+        self.v, self.t, self.mask, self.s = [self.data[k] for k in ('visual','text','valid','structures')]
+        self.m = SemanticStructureDecoder(8,[5,6],4,'adaptive','conditioned')
+
+    def test_class_order_extension_and_batch(self):
+        y = self.m(self.v,self.t,self.mask,self.s)
+        order = torch.tensor([2,0,1])
+        torch.testing.assert_close(self.m(self.v,self.t[order],self.mask[order],self.s), y[:,order])
+        torch.testing.assert_close(self.m(self.v,self.t[:2],self.mask[:2],self.s), y[:,:2])
+        torch.testing.assert_close(self.m(self.v[:1],self.t,self.mask,[s[:1] for s in self.s]), y[:1])
+
+    def test_identical_parameter_initialization(self):
+        states = []
+        for semantic in ('mean','adaptive'):
+            for spatial in ('identity','geometry','conditioned'):
+                torch.manual_seed(12)
+                states.append(SemanticStructureDecoder(8,[5,6],4,semantic,spatial).state_dict())
+        for state in states[1:]:
+            for key in states[0]:
+                torch.testing.assert_close(state[key],states[0][key],rtol=0,atol=0)
+
+    def test_one_description_equivalence_and_norm(self):
+        baseline = SemanticStructureDecoder(8,[5,6],4,'mean','conditioned')
+        baseline.load_state_dict(self.m.state_dict())
+        torch.testing.assert_close(baseline(self.v,self.t[:,:1],self.mask[:,:1],self.s),
+                                   self.m(self.v,self.t[:,:1],self.mask[:,:1],self.s))
+        for model in (baseline,self.m):
+            v = torch.nn.functional.normalize(self.v,dim=1)
+            text = torch.nn.functional.normalize(self.t[0],dim=-1)
+            selected = model.selected_text(v,text)
+            torch.testing.assert_close(selected.norm(dim=1),torch.ones_like(selected[:,0]))
+
+    def test_mask_padding_and_bad_inputs(self):
+        expected = self.m(self.v,self.t,self.mask,self.s)
+        changed = self.t.clone(); changed[1,1] = float('nan')
+        torch.testing.assert_close(self.m(self.v,changed,self.mask,self.s),expected)
+        mask = self.mask.clone(); mask[0] = False
+        with self.assertRaises(ValueError): self.m(self.v,self.t,mask,self.s)
+        with self.assertRaises(ValueError): SemanticStructureDecoder(8,[5],spatial_mode='transport')
+
+    def test_transport_boundaries_and_zero_condition(self):
+        h = torch.ones(2,3,4,3,4)
+        g, e = torch.randn(2,4,3,4),torch.randn_like(h)
+        torch.testing.assert_close(self.m.transport(h,g,e),h)
+        plain = SemanticStructureDecoder(8,[5,6],4,'mean','geometry')
+        self.m.semantic_strength = 0
+        values = torch.randn_like(h)
+        torch.testing.assert_close(self.m.transport(values,g,e),plain.transport(values,g,e))
+
+    def test_condition_changes_transport(self):
+        h = torch.randn(2,3,4,3,4); g = torch.randn(2,4,3,4); e = torch.randn_like(h)
+        a = self.m.transport(h,g,e)
+        self.m.spatial_mode = 'geometry'
+        b = self.m.transport(h,g,e)
+        self.assertGreater((a-b).abs().max().item(),1e-5)
+
+    def test_gradients_and_all_ignore_adamw_state(self):
+        for semantic in ('mean','adaptive'):
+            for spatial in ('identity','geometry','conditioned'):
+                model = SemanticStructureDecoder(8,[5,6],4,semantic,spatial)
+                opt = torch.optim.AdamW(model.parameters(),lr=1e-3)
+                loss = optimization_step(model,opt,self.v,self.t,self.mask,self.s,self.data['labels'])
+                self.assertIsNotNone(loss)
+                self.assertTrue(all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters()))
+                before = copy.deepcopy(model.state_dict()); state = copy.deepcopy(opt.state_dict())
+                self.assertIsNone(optimization_step(model,opt,self.v,self.t,self.mask,self.s,torch.full_like(self.data['labels'],255)))
+                for key in before: torch.testing.assert_close(model.state_dict()[key],before[key],rtol=0,atol=0)
+                for idx, values in state['state'].items():
+                    for key,value in values.items():
+                        torch.testing.assert_close(opt.state_dict()['state'][idx][key],value,rtol=0,atol=0)
+        logits = self.m(self.v,self.t,self.mask,self.s)
+        logits.retain_grad()
+        from model import segmentation_loss
+        segmentation_loss(logits,self.data['labels']).backward()
+        self.assertEqual(logits.grad[0].abs().sum().item(),0)
+
+class PipelineContracts(unittest.TestCase):
+    def setUp(self):
         torch.set_num_threads(1)
-        self.v = torch.randn(2, 8, 3, 4)
-        self.t = torch.randn(3, 2, 8)
-        self.valid = torch.tensor([[True, True], [True, False], [True, True]])
-        self.s = [torch.randn(2, 5, 3, 4), torch.randn(2, 6, 6, 8)]
-        self.m = SemanticStructureDecoder(8, [5, 6], width=4)
 
-    def test_class_order_and_extension(self):
-        y = self.m(self.v, self.t, self.valid, self.s)
-        order = torch.tensor([2, 0, 1])
-        z = self.m(self.v, self.t[order], self.valid[order], self.s)
-        torch.testing.assert_close(z, y[:, order])
-        z = self.m(self.v, self.t[:2], self.valid[:2], self.s)
-        torch.testing.assert_close(z, y[:, :2])
+    def test_metrics_known_counts(self):
+        cm = confusion(torch.tensor([0,1,0,1]),torch.tensor([0,0,1,255]),3)
+        self.assertEqual(cm.tolist(),[[1,1,0],[1,0,0],[0,0,0]])
+        result = metrics(cm,['a','b','c'])
+        self.assertAlmostEqual(result['miou'],1/6)
+        self.assertIsNone(result['iou'][2])
 
-    def test_padding_and_empty(self):
-        y = self.m(self.v, self.t, self.valid, self.s)
-        t = self.t.clone(); t[1, 1] = 100
-        torch.testing.assert_close(y, self.m(self.v, t, self.valid, self.s))
-        bad = self.valid.clone(); bad[0] = False
-        with self.assertRaises(ValueError):
-            self.m(self.v, self.t, bad, self.s)
-
-    def test_constant_transport_at_borders(self):
-        h = torch.ones(2, 3, 4, 3, 4)
-        actual = self.m.transport(h, torch.randn(2, 4, 3, 4), torch.randn_like(h))
-        torch.testing.assert_close(actual, h)
-
-    def test_ablation_training_and_ignore(self):
-        target = torch.randint(0, 3, (2, 6, 8)); target[:, 0] = 255
-        for semantic in ("mean", "adaptive"):
-            for spatial in ("fusion", "transport"):
-                m = SemanticStructureDecoder(8, [5, 6], 4, semantic, spatial)
-                optimizer = torch.optim.AdamW(m.parameters(), lr=1e-3)
-                y = m(self.v, self.t, self.valid, self.s)
-                y.retain_grad()
-                loss = segmentation_loss(y, target); loss.backward()
-                self.assertTrue(torch.isfinite(loss))
-                self.assertEqual(y.grad[:, :, 0].abs().sum().item(), 0)
-                self.assertTrue(all(torch.isfinite(p.grad).all() for p in m.parameters() if p.grad is not None))
-                optimizer.step()
-                y = m(self.v, self.t, self.valid, self.s)
-                loss = segmentation_loss(y, torch.full_like(target, 255))
-                self.assertEqual(loss.item(), 0)
-                loss.backward()
-
-    def test_all_ignore_batch_skips_optimizer_step(self):
-        # A mixed cache can sample only ignored labels on a particular step.
-        seed = None
-        for candidate in range(20):
-            torch.manual_seed(candidate)
-            initial = SemanticStructureDecoder(8, [5])
-            if torch.randint(2, (1,)).item() == 0:
-                seed = candidate
-                break
-        self.assertIsNotNone(seed)
+    def test_cache_rejection_and_overlap(self):
         with tempfile.TemporaryDirectory() as directory:
-            cache = Path(directory) / "cache.pt"
-            output = Path(directory) / "output.pt"
-            labels = torch.zeros(2, 3, 4, dtype=torch.long)
-            labels[0] = 255
-            torch.save({"visual": torch.randn(2, 8, 3, 4),
-                        "text": torch.randn(2, 1, 8),
-                        "valid": torch.ones(2, 1, dtype=torch.bool),
-                        "structures": [torch.randn(2, 5, 3, 4)],
-                        "labels": labels, "metadata": {}}, cache)
-            result = subprocess.run([sys.executable, str(Path(__file__).with_name("train_cached.py")),
-                                     "--cache", str(cache), "--output", str(output),
-                                     "--steps", "1", "--batch-size", "1", "--seed", str(seed)],
-                                    check=True, capture_output=True, text=True)
-            self.assertIn("all_ignore", result.stdout)
-            saved = torch.load(output, map_location="cpu", weights_only=True)
-            for key, value in initial.state_dict().items():
-                torch.testing.assert_close(saved["model"][key], value, rtol=0, atol=0)
-            self.assertEqual(len(saved["optimizer"]["state"]), 0)
+            path = Path(directory)/'cache.pt'
+            good = fixture(); torch.save(good,path)
+            load_cache(path,'train')
+            bad = copy.deepcopy(good); bad['metadata']['descriptions'][0] = ['same','same']
+            torch.save(bad,path)
+            with self.assertRaises(ValueError): load_cache(path)
+            with self.assertRaises(ValueError): check_compatible(good,good)
+            val = fixture('validation'); check_compatible(good,val)
+            bad = copy.deepcopy(good); bad['metadata']['split']='test'; torch.save(bad,path)
+            with self.assertRaises(ValueError): load_cache(path)
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_paired_runs_resume_and_reload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); train = root/'train.pt'; val = root/'val.pt'
+            torch.save(fixture(),train); torch.save(fixture('validation'),val)
+            def execute(name, steps, resume=None, semantic='mean',spatial='geometry'):
+                args = ['--cache',str(train),'--val-cache',str(val),'--output',str(root/name),
+                        '--steps',str(steps),'--width','4','--eval-every','1','--save-every','1',
+                        '--semantic',semantic,'--spatial',spatial]
+                if resume: args += ['--resume',str(resume)]
+                run(parser().parse_args(args))
+                return torch.load(root/name/'final.pt',weights_only=True)
+            full = execute('full',4)
+            execute('part',2)
+            resumed = execute('resume',4,root/'part/final.pt')
+            for key in full['model']: torch.testing.assert_close(full['model'][key],resumed['model'][key],rtol=0,atol=0)
+            self.assertEqual(full['sample_trace'],resumed['sample_trace'])
+            self.assertTrue(all(0 not in row for row in full['sample_trace']))
+            for semantic, spatial in [('adaptive','geometry'),('mean','conditioned'),('adaptive','conditioned')]:
+                other=execute(semantic+spatial,4,semantic=semantic,spatial=spatial)
+                self.assertEqual(full['sample_trace'],other['sample_trace'])
+                self.assertEqual(full['initial_state_sha256'],other['initial_state_sha256'])
+            self.assertTrue((root/'full/validation_000004.json').exists())
+            with self.assertRaises(FileExistsError): execute('full',4)
+
+if __name__ == '__main__': unittest.main()
