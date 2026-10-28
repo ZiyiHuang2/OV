@@ -1,5 +1,10 @@
 """Synthetic GPU contracts; these tests are not real-data effectiveness evidence."""
 import io
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 import torch
 from model import SemanticStructureDecoder, segmentation_loss
@@ -7,6 +12,17 @@ from model import SemanticStructureDecoder, segmentation_loss
 
 @unittest.skipUnless(torch.cuda.is_available(), 'CUDA required')
 class GPUContracts(unittest.TestCase):
+    def test_fresh_cuda_training_process(self):
+        from test_model import fixture
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            torch.save(fixture(),root/'cache.pt')
+            subprocess.run([sys.executable,str(Path(__file__).with_name('train_cached.py')),
+                '--cache',str(root/'cache.pt'),'--output',str(root/'run'),
+                '--device','cuda:0','--steps','2','--width','4'],check=True,
+                env=dict(os.environ,CUBLAS_WORKSPACE_CONFIG=':4096:8'),capture_output=True,text=True)
+            self.assertTrue((root/'run/final.pt').exists())
+
     def test_shapes_paths_gradients_and_reload(self):
         torch.set_num_threads(2)
         torch.use_deterministic_algorithms(True)

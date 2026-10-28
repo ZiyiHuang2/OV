@@ -36,6 +36,7 @@ def run(a):
     if str(a.device).startswith('cuda'):
         if not torch.cuda.is_available():
             raise RuntimeError('CUDA requested but unavailable')
+        torch.cuda.init()
         torch.cuda.manual_seed_all(a.seed)
         torch.cuda.reset_peak_memory_stats(a.device)
     train = load_cache(a.cache, 'train')
