@@ -142,6 +142,8 @@ def main():
     out.mkdir(parents=True, exist_ok=False)
     torch.set_num_threads(2)
     torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = False
     torch.manual_seed(a.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(a.seed)
@@ -159,6 +161,7 @@ def main():
                 'weight': a.weight, 'eval_every': a.eval_every, 'budget': a.budget,
                 'names': data.names, 'seen_ids': data.seen,
                 'precision': 'fp32', 'frozen_clip': True, 'module_mode': 'eval',
+                'cudnn_tf32': False, 'matmul_tf32': False,
                 'deterministic_algorithms': True, 'cublas_workspace': os.environ['CUBLAS_WORKSPACE_CONFIG'],
                 'train_images_per_a_update': 2, 'gain_scale': 100.}
     write(out/'protocol.json', protocol)
