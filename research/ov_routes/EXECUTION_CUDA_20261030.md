@@ -27,3 +27,5 @@ learned 比 random 高 0.277 pp，但比 fixed 低 0.304 pp，比 zero 低 0.430
 结论：首轮不支持元适配和 learned 重观察各自带来超过匹配简单对照的可靠增量；建议暂缓复杂机制，保留 ERM/joint 作为进一步确认 seen–留类权衡的简单参考。只有单种子、单数据划分，不能证明稳定性或跨数据集泛化；不读取 test。4k learned 末段变化很小，但预算仍不足以证明充分收敛。固定前四张验证图的七组预测已重算并与逐图混淆逐值一致；完整输出、所有节点的逐图混淆/检查点、曲线、逐类 IoU/precision/recall/预测面积和审计保存在服务器独立目录，不上传数据和权重。
 
 复跑：在本目录 checkout 下使用服务器独立目录的 `run_formal_cuda_20261030.sh`，先指定确实空闲设备和新的 `OV_OUTPUT`；详细固定参数见其脚本和每组 `protocol.json`。检查 CPU/其他用户任务后运行，不覆盖现有输出。原始结果路径 `/home/wangchengjun/huangziyi/ov_routes_acceptance_20261029/formal_cuda_20261030`，分析 `analysis_cuda_20261030`。测试：`python -m pytest -q research/ov_routes/test_routes.py`。
+
+参数更新幅度核验：以同一预训练 checkpoint 的可训练参数为起点，16k 终点的整体 L2 更新范数分别为 ERM 10.9677、joint 8.8324、meta 8.8345（起点参数范数 91.7684；joint 与 meta 终点间 L2 为 0.1449）。meta 与 joint 的更新幅度几乎相同，较 ERM 更小；这不能证明小学习率本身等价于其效果，仍需匹配学习率对照才能作因果判断。数据保存在 `analysis_cuda_20261030/parameter_update_norm.json`。
