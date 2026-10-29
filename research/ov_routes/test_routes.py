@@ -147,6 +147,9 @@ def test_policies_equal_budget_and_reproducible():
 def test_confusion_full_competition_metrics():
     cm = torch.tensor([[8, 1, 1], [0, 5, 5], [2, 3, 5]])
     r = metrics(cm, [0, 1])
+    assert r['precision'] == pytest.approx([.8, 5/9, 5/11])
+    assert r['recall'] == pytest.approx([.8, .5, .5])
+    assert r['gt_pixels'] == [10, 10, 10] and r['pred_pixels'] == [10, 9, 11]
     assert r['unseen'] == pytest.approx(5/16)
     assert r['hiou'] == pytest.approx(2*r['seen']*r['unseen']/(r['seen']+r['unseen']))
 
@@ -210,3 +213,13 @@ def test_real_file_runner_with_mock_host_train_reload_and_resume(tmp_path, monke
 def test_state_restore_rejects_partial_checkpoint():
     m = ToyHost()
     with pytest.raises(ValueError): restore(m, {})
+
+
+def test_configured_device_is_forwarded_to_clip():
+    from detectron2.config import get_cfg
+    from detectron2.projects.deeplab import add_deeplab_config
+    from cat_seg import add_cat_seg_config
+    from cat_seg.modeling.transformer.cat_seg_predictor import CATSegPredictor
+    cfg = get_cfg(); add_deeplab_config(cfg); add_cat_seg_config(cfg)
+    cfg.MODEL.DEVICE = 'cpu'
+    assert CATSegPredictor.from_config(cfg)['device'] == 'cpu'

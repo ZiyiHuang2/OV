@@ -2,11 +2,13 @@
 import argparse
 import json
 import math
+import os
 from pathlib import Path
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 import torch
 from torch.nn import functional as F
 from .data import Manifest, augment, digest, episode, metrics
-from .episodic import objective
+from .episodic import objective, masked_bce, remap_support
 from .host import build_host
 from .views import ViewSelector, predict_views, training_actions
 
@@ -66,6 +68,23 @@ def check(host, data, device):
     norm = sum(float(p.grad.abs().sum()) for p in host.parameters() if p.grad is not None)
     if norm == 0 or not math.isfinite(norm) or any(p.grad is not None for p in host.clip.parameters()):
         raise RuntimeError('Invalid full-host/frozen-CLIP gradients')
+    # Isolate the query contribution to the outer gradient and verify the
+    # temporary support update itself is nonzero on actual pretrained weights.
+    params = [p for p in host.parameters() if p.requires_grad]
+    outer = [None if p.grad is None else p.grad.detach().clone() for p in params]
+    support_ids = [i for i in range(len(data.names)) if i not in held]
+    support = masked_bce(host(x[None], [data.names[i] for i in support_ids]),
+                         remap_support(y[None], support_ids))
+    support_grad = torch.autograd.grad(support, params, allow_unused=True)
+    inner_norm = sum(float(g.abs().sum()) for g in support_grad if g is not None)
+    query_norm = 0.
+    for outer_grad, inner_grad, param in zip(outer, support_grad, params):
+        if outer_grad is not None or inner_grad is not None:
+            u = torch.zeros_like(param) if outer_grad is None else outer_grad
+            v = torch.zeros_like(param) if inner_grad is None else inner_grad
+            query_norm += float((u-v).abs().sum())
+    if not math.isfinite(inner_norm) or not math.isfinite(query_norm) or inner_norm == 0 or query_norm == 0:
+        raise RuntimeError('Real support update or held-class query gradient is zero')
     for n, p in host.named_parameters():
         if n in before:
             torch.testing.assert_close(p.detach().cpu(), before[n], rtol=0, atol=0)
@@ -77,7 +96,8 @@ def check(host, data, device):
     torch.testing.assert_close(no_views, host.predict_logits(q[None], data.names)[0].sigmoid())
     _, trace1 = predict_views(host, q, data.names, budget=1)
     return {'native_max_error': parity, 'meta_loss': float(loss.detach()),
-            'gradient_l1': norm, 'episode': [si, qi], **detail,
+            'gradient_l1': norm, 'support_gradient_l1': inner_norm,
+            'query_gradient_l1': query_norm, 'episode': [si, qi], **detail,
             'view_gains': sample[1].tolist(), 'zero_views': trace0, 'one_view': trace1}
 
 
@@ -121,6 +141,7 @@ def main():
     out = Path(a.output)
     out.mkdir(parents=True, exist_ok=False)
     torch.set_num_threads(2)
+    torch.use_deterministic_algorithms(True)
     torch.manual_seed(a.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(a.seed)
@@ -138,6 +159,7 @@ def main():
                 'weight': a.weight, 'eval_every': a.eval_every, 'budget': a.budget,
                 'names': data.names, 'seen_ids': data.seen,
                 'precision': 'fp32', 'frozen_clip': True, 'module_mode': 'eval',
+                'deterministic_algorithms': True, 'cublas_workspace': os.environ['CUBLAS_WORKSPACE_CONFIG'],
                 'train_images_per_a_update': 2, 'gain_scale': 100.}
     write(out/'protocol.json', protocol)
     if a.artifact:

@@ -112,4 +112,7 @@ def metrics(cm, seen):
     return {'units': 'fraction', 'miou': mean(range(len(cm))), 'seen': s, 'unseen': u,
             'hiou': None if s is None or u is None else (2*s*u/(s+u) if s+u else 0.),
             'iou': [float(x) if torch.isfinite(x) else None for x in iou],
+            'precision': [float(a/b) if b > 0 else None for a, b in zip(tp, pred)],
+            'recall': [float(a/b) if b > 0 else None for a, b in zip(tp, gt)],
+            'gt_pixels': gt.long().tolist(), 'pred_pixels': pred.long().tolist(),
             'confusion_gt_rows_pred_columns': cm.long().tolist()}

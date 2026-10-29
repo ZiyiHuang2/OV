@@ -41,6 +41,7 @@ class CATSegPredictor(nn.Module):
         feature_resolution: tuple,
         window_sizes: tuple,
         attention_type: str,
+        device: str = None,
         aggregation: str = 'serial',
         context_adapter: str = 'none',
         lsk_dilation: int = 3,
@@ -69,7 +70,7 @@ class CATSegPredictor(nn.Module):
         assert self.class_texts != None
         if self.test_class_texts == None:
             self.test_class_texts = self.class_texts
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = device or ("cuda" if torch.cuda.is_available() else "cpu")
   
         self.tokenizer = None
         if clip_pretrained == "ViT-G" or clip_pretrained == "ViT-H":
@@ -144,6 +145,7 @@ class CATSegPredictor(nn.Module):
         ret["train_class_json"] = cfg.MODEL.SEM_SEG_HEAD.TRAIN_CLASS_JSON
         ret["test_class_json"] = cfg.MODEL.SEM_SEG_HEAD.TEST_CLASS_JSON
         ret["clip_pretrained"] = cfg.MODEL.SEM_SEG_HEAD.CLIP_PRETRAINED
+        ret["device"] = cfg.MODEL.DEVICE
         ret["prompt_ensemble_type"] = cfg.MODEL.PROMPT_ENSEMBLE_TYPE
 
         # Aggregator parameters:
