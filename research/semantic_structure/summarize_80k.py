@@ -1,5 +1,5 @@
 """Export the predetermined six checkpoints; fail if matched controls differ."""
-import argparse,csv,hashlib,json,statistics
+import argparse,csv,hashlib,json,statistics,subprocess,sys
 from pathlib import Path
 
 def csvout(path,rows):
@@ -29,5 +29,6 @@ def main():
     csvout(r/'summary.csv',rows);csvout(r/'per_class_17.csv',classes);csvout(r/'learning_curve.csv',curves)
     (r/'matched_checks.json').write_text(json.dumps({'passed':True,'initial_hash':inits[0],'sampler_hash':traces[0],'lr_sequence_hash':rates[0]},indent=2)+'\n')
     print(json.dumps(rows,indent=2))
+    subprocess.run([sys.executable,str(Path(__file__).with_name('report_80k.py')),'--root',str(r)],check=True)
 
 if __name__=='__main__':main()
