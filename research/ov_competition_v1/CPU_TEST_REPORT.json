@@ -1,0 +1,15 @@
+{
+  "status": "CPU unit tests passed; no server/CUDA run",
+  "python": "3.13.5",
+  "torch": "2.10.0+cpu",
+  "cuda_available": false,
+  "passed": 14,
+  "failed": 0,
+  "command": "python -m pytest -q ov_competition_v1/test_*.py",
+  "real_CUDA_preflight": false,
+  "dataset_audit": false,
+  "full_CATSeg_parity": false,
+  "formal_training": false,
+  "additional_shape_smoke": "CPU forward/backward [B=1,D=128,K=35,H=24,W=24] passed for B and C",
+  "mixed_precision_smoke": "CPU FP16 feature / FP32 scores finite output"
+}

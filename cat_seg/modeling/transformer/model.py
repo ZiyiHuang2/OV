@@ -825,8 +825,18 @@ class Aggregator(nn.Module):
             text_feats = text_feats / text_feats.norm(dim=-1, keepdim=True)
             projected_text_guidance = self.text_guidance_projection(text_feats)
 
-        for layer in self.layers:
-            corr_embed = layer(corr_embed, projected_guidance, projected_text_guidance)
+        for layer_index, layer in enumerate(self.layers):
+            if layer_index == 0 and getattr(self, 'competition_update', None) is not None:
+                if getattr(layer, 'aggregation', 'serial') != 'serial' or getattr(layer, 'cost_context', None) is not None:
+                    raise RuntimeError('Competition V1 requires native serial aggregation without cost_context')
+                spatial = layer.swin_block(corr_embed, projected_guidance)
+                # 'corr' is the aligned raw [B,P,K,H,W] correlation AFTER native
+                # category truncation, if any. Prompt reduction matches the
+                # current single-prompt protocol; never use postdecoder logits.
+                spatial = self.competition_update(spatial, corr.mean(dim=1), enabled=not getattr(self, "competition_bypass", False))
+                corr_embed = layer.attention(spatial, projected_text_guidance)
+            else:
+                corr_embed = layer(corr_embed, projected_guidance, projected_text_guidance)
 
         logit = self.conv_decoder(corr_embed, projected_decoder_guidance)
         if classes is not None:

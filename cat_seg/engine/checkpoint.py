@@ -39,6 +39,9 @@ def model_config(cfg):
             keys += ('MODEL.OVRS.CAD_SCOPE',)
         if cfg.MODEL.OVRS.CAD_MODE != 'residual':
             keys += ('MODEL.OVRS.CAD_MODE',)
+    if cfg.MODEL.OVRS.COMPETITION_ARM:
+        keys += ('MODEL.OVRS.COMPETITION_ARM', 'MODEL.OVRS.COMPETITION_BASE_SHA256',
+                 'MODEL.OVRS.COMPETITION_SCALE')
     result = {}
     for key in keys:
         value = cfg
@@ -71,7 +74,7 @@ class OVRSCheckpointer(DetectionCheckpointer):
         if self.strict and self.expected_config is not None:
             metadata = checkpoint.get('ovrs_metadata')
             if metadata is None:
-                if not self.allow_unverified:
+                if self.expected_config.get('MODEL.OVRS.COMPETITION_ARM') or not self.allow_unverified:
                     raise ValueError(
                         'Checkpoint has no OVRS model configuration metadata. '
                         'For a verified legacy checkpoint, explicitly pass '
@@ -90,6 +93,10 @@ class OVRSCheckpointer(DetectionCheckpointer):
                 if changed:
                     raise ValueError('Checkpoint model configuration mismatch: ' + json.dumps(changed, sort_keys=True))
         incompatible = super()._load_model(checkpoint)
+        if not self.strict and self.expected_config and self.expected_config.get('MODEL.OVRS.COMPETITION_ARM'):
+            expected = {k for k in self.model.state_dict() if '.competition_update.' in k}
+            if set(incompatible.missing_keys) != expected or incompatible.unexpected_keys or incompatible.incorrect_shapes:
+                raise ValueError(f'Invalid competition initialization: {incompatible}')
         if self.strict and (incompatible.missing_keys or incompatible.unexpected_keys or incompatible.incorrect_shapes):
             raise ValueError(
                 'Checkpoint does not match the evaluation architecture or resume model. '

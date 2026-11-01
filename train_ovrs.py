@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """CAT-Seg training/evaluation entry point with explicit RS dataset setup."""
 import json
+import hashlib
 import logging
 from pathlib import Path
 import weakref
 
 import numpy as np
+from PIL import Image
 import torch
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
@@ -35,14 +37,46 @@ def harmonic_iou(seen, unseen):
 
 
 class SeenUnseenEvaluator(SemSegEvaluator):
-    def __init__(self, dataset_name, **kwargs):
+    def __init__(self, dataset_name, *, collect_samples=False, **kwargs):
         super().__init__(dataset_name, **kwargs)
         metadata = MetadataCatalog.get(dataset_name)
         self.names = metadata.stuff_classes
         self.seen_ids = set(metadata.seen_class_ids)
+        self.collect_samples = collect_samples
+        self.sample_records = []
+
+    def reset(self):
+        super().reset()
+        self.sample_records = []
+
+    def process(self, inputs, outputs):
+        super().process(inputs, outputs)
+        if not self.collect_samples:
+            return
+        k = len(self.names)
+        for item, output in zip(inputs, outputs):
+            pred = output['sem_seg'].argmax(dim=0).to('cpu').numpy().astype(np.int64)
+            with Image.open(self.input_file_to_gt_file[item['file_name']]) as image:
+                target = np.asarray(image, dtype=np.int64)
+            valid = (target != self._ignore_label)
+            hist = np.bincount(k * target[valid] + pred[valid], minlength=k*k).reshape(k, k)
+            self.sample_records.append({'file_name': item['file_name'],
+                                        'ground_truth_pixels': hist.sum(axis=1).tolist(),
+                                        'predicted_pixels': hist.sum(axis=0).tolist(),
+                                        'intersection_pixels': np.diag(hist).tolist()})
 
     def evaluate(self):
+        records = comm.all_gather(self.sample_records) if self.collect_samples and self._distributed else [self.sample_records]
         result = super().evaluate()
+        if self.collect_samples and result is not None and self._output_dir:
+            out = Path(self._output_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            with (out / 'per_image.jsonl').open('x') as f:
+                for group in records:
+                    for row in group:
+                        f.write(json.dumps(row) + '\n')
+            with (out / 'confusion_matrix.npy').open('xb') as f:
+                np.save(f, self._conf_matrix)
         if result is None:
             return None
         metrics = result['sem_seg']
@@ -60,6 +94,22 @@ class SeenUnseenEvaluator(SemSegEvaluator):
 
 
 class OVRSTrainer(Trainer):
+    @classmethod
+    def build_model(cls, cfg):
+        model = super().build_model(cfg)
+        arm = cfg.MODEL.OVRS.COMPETITION_ARM
+        if arm:
+            from research.ov_competition_v1.install import install
+            checkpoint = torch.load(cfg.MODEL.OVRS.COMPETITION_BASE, map_location='cpu', weights_only=False)
+            model.load_state_dict(checkpoint.get('model', checkpoint), strict=True)
+            with torch.random.fork_rng(devices=list(range(torch.cuda.device_count()))):
+                torch.manual_seed(cfg.SEED)
+                install(model, arm, initial_scale=cfg.MODEL.OVRS.COMPETITION_SCALE)
+            if arm != 'A':
+                from research.ov_competition_v1.statistics import attach_statistics
+                attach_statistics(model.sem_seg_head.predictor.transformer.competition_update)
+        return model
+
     def __init__(self, cfg, *, run_directory, resume=False, allow_unverified=False):
         self.run_directory = run_directory
         self.resume_requested = resume
@@ -78,8 +128,16 @@ class OVRSTrainer(Trainer):
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
+        if output_folder is None and cfg.MODEL.OVRS.COMPETITION_ARM:
+            from detectron2.utils.events import get_event_storage
+            try:
+                event_iter = get_event_storage().iter
+                output_folder = str(Path(cfg.OUTPUT_DIR) / 'inference' / f'event_iter_{event_iter:07d}')
+            except AssertionError:
+                output_folder = str(Path(cfg.OUTPUT_DIR) / 'inference' / 'final')
         return SeenUnseenEvaluator(
             dataset_name, distributed=True,
+            collect_samples=bool(cfg.MODEL.OVRS.COMPETITION_ARM),
             output_dir=output_folder or str(Path(cfg.OUTPUT_DIR) / 'inference'),
         )
 
@@ -107,6 +165,25 @@ def setup(args):
     if args.max_iter is not None:
         cfg.SOLVER.MAX_ITER = args.max_iter
     cfg.merge_from_list(args.opts)
+    if args.competition_arm:
+        cfg.MODEL.OVRS.COMPETITION_ARM = args.competition_arm
+        if not args.competition_base_weights:
+            raise ValueError('Competition A/B/C requires --competition-base-weights')
+        base = Path(args.competition_base_weights).resolve()
+        if not base.is_file():
+            raise FileNotFoundError(base)
+        cfg.MODEL.OVRS.COMPETITION_BASE = str(base)
+        with base.open('rb') as f:
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: f.read(8 * 1024 * 1024), b''):
+                digest.update(chunk)
+            cfg.MODEL.OVRS.COMPETITION_BASE_SHA256 = digest.hexdigest()
+        if not args.eval_only and not args.resume and str(Path(cfg.MODEL.WEIGHTS).resolve()) != str(base):
+            raise ValueError('Initial training weights must equal --competition-base-weights')
+        if cfg.MODEL.OVRS.AGGREGATION != 'serial' or cfg.MODEL.OVRS.CONTEXT_ADAPTER != 'none' or cfg.MODEL.OVRS.CAD_STAGES or cfg.MODEL.PROMPT_ENSEMBLE_TYPE != 'single':
+            raise ValueError('Competition V1 requires native serial aggregation and single prompt')
+    elif args.competition_base_weights:
+        raise ValueError('--competition-base-weights requires --competition-arm')
     cfg.OUTPUT_DIR = str(Path(cfg.OUTPUT_DIR).resolve())
     if cfg.MODEL.SEM_SEG_HEAD.CLIP_PRETRAINED != 'ViT-B/16':
         raise ValueError('This RS runner supports the tested OpenAI CLIP ViT-B/16 path')
@@ -155,6 +232,8 @@ def make_parser():
     parser.add_argument('--dataset-manifest', required=True)
     parser.add_argument('--experiment', choices=EXPERIMENTS, default='baseline')
     parser.add_argument('--weights')
+    parser.add_argument('--competition-arm', choices=('A', 'B', 'C'))
+    parser.add_argument('--competition-base-weights')
     parser.add_argument('--output')
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--max-iter', type=int)

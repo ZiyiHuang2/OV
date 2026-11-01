@@ -94,6 +94,10 @@ def add_cat_seg_config(cfg):
 
     # Independent module controls. Defaults preserve CAT-Seg tensor computation.
     cfg.MODEL.OVRS = CN()
+    cfg.MODEL.OVRS.COMPETITION_ARM = ''
+    cfg.MODEL.OVRS.COMPETITION_BASE = ''
+    cfg.MODEL.OVRS.COMPETITION_BASE_SHA256 = ''
+    cfg.MODEL.OVRS.COMPETITION_SCALE = 0.01
     cfg.MODEL.OVRS.AGGREGATION = 'serial'
     cfg.MODEL.OVRS.CONTEXT_ADAPTER = 'none'
     cfg.MODEL.OVRS.LSK_DILATION = 3
