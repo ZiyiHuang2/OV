@@ -140,7 +140,7 @@ class OVRSTrainer(Trainer):
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
-        if output_folder is None and cfg.MODEL.OVRS.COMPETITION_ARM:
+        if output_folder is None and (cfg.MODEL.OVRS.COMPETITION_ARM or cfg.MODEL.OVRS.RIVAL_ARM):
             from detectron2.utils.events import get_event_storage
             try:
                 event_iter = get_event_storage().iter
@@ -149,7 +149,7 @@ class OVRSTrainer(Trainer):
                 output_folder = str(Path(cfg.OUTPUT_DIR) / 'inference' / 'final')
         return SeenUnseenEvaluator(
             dataset_name, distributed=True,
-            collect_samples=bool(cfg.MODEL.OVRS.COMPETITION_ARM),
+            collect_samples=bool(cfg.MODEL.OVRS.COMPETITION_ARM or cfg.MODEL.OVRS.RIVAL_ARM),
             output_dir=output_folder or str(Path(cfg.OUTPUT_DIR) / 'inference'),
         )
 
@@ -272,7 +272,7 @@ def make_parser():
     parser.add_argument('--weights')
     parser.add_argument('--competition-arm', choices=('A', 'B', 'C'))
     parser.add_argument('--competition-base-weights')
-    parser.add_argument('--rival-arm', choices=('S', 'M', 'R', 'P'))
+    parser.add_argument('--rival-arm', choices=('S', 'M', 'V', 'R', 'P'))
     parser.add_argument('--rival-base-weights')
     parser.add_argument('--output')
     parser.add_argument('--batch-size', type=int)
