@@ -1,6 +1,6 @@
 # Rival-conditioned spatial transfer: research prototype
 
-**Status (2026-11-13):** New hypothesis and trainable implementation. Module CPU tests passed locally; **no CUDA full-host parity, checkpoint/resume, segmentation training, multi-seed, or benchmark gain has been verified**. Do not claim novelty or SOTA.
+**Status (2026-11-13):** New hypothesis and trainable implementation. Isolated CPU tests and a constructed-target optimizer/resume smoke passed locally; **no CUDA full-host parity, checkpoint/resume, segmentation training, multi-seed, or benchmark gain has been verified**. Do not claim novelty or SOTA.
 
 ## Motivation and relation to prior work
 
@@ -36,19 +36,21 @@ Scores are not treated as confidence probabilities; both messages use the same n
 | Native | No additional module | No | No | Existing CAT-Seg A |
 | S | Yes | No | No | Parameterized spatial-only control |
 | M | Yes | Yes | No | Margins conditioned on spatial exchange |
+| V | Yes (M attention retained) | Yes | Only rival Value message | Isolates rival-feature message contribution |
 | P | No | Yes | Yes | Rival contrast without spatial mixing |
 | R | Yes | Yes | Yes | Proposed joint interaction |
 
-S/M/R instantiate identical trainable parameter names/shapes; some paths are inactive by design. P does not match FLOPs or active capacity and is a mechanism control, not a full compute-matched baseline. Existing Competition V1 A/B/C must remain separate training runs, **not combined** with R.
+S/M/V/R instantiate identical trainable parameter names/shapes; some paths are inactive by design. P does not match FLOPs or active capacity and is a mechanism control, not a full compute-matched baseline. Existing Competition V1 A/B/C must remain separate training runs, **not combined** with R.
 
 ## Implementation and execution
 
-Based on `feat/ov-competitive-spatial-update`; its core CAT-Seg and Competition V1 code is kept intact. This branch adds a new optional `rival_update` at the same location: **after the first native Swin and before the class transformer**, using aligned raw similarity from the host after any native top-K truncation. Default config leaves both optional methods off. Only serial CAT-Seg, single prompt, no cost-context/CAD are supported for R. The training initialization loads the same full CAT-Seg checkpoint **before** attaching the new module and building the optimizer/DDP. Checkpoint metadata records arm, rank, attention dimension, initialization scale, and base weights SHA-256. The existing train/evaluation entry `train_ovrs.py` retains the dataset manifest, seed, source-dev selection, original eval code, CLIP Q/V policy, batch/steps and provenance.
+Based on `feat/ov-competitive-spatial-update`; its core CAT-Seg and Competition V1 code is kept intact. This branch adds a new optional `rival_update` at the same location: **after the first native Swin and before the class transformer**, using aligned raw similarity from the host after any native top-K truncation. Default config leaves both optional methods off. Only serial CAT-Seg, single prompt, no cost-context/CAD are supported for R. The training initialization loads the same full CAT-Seg checkpoint **before** attaching the new module and building the optimizer/DDP. Checkpoint metadata records arm, rank, attention dimension, initialization scale, and base weights SHA-256. Rival evaluation now uses the same per-image statistics and iteration-specific output directories as Competition V1. These statistics do not encode pixelwise paired model-to-model correction maps. The existing train/evaluation entry `train_ovrs.py` retains the dataset manifest, seed, source-dev selection, original eval code, CLIP Q/V policy, batch/steps and provenance.
 
-Run CPU tests, without needing Detectron2:
+Run CPU tests and a six-step synthetic optimization/resume smoke experiment (these are **not** segmentation benchmarks), without needing Detectron2:
 
 ```bash
-python -m pytest -q research/ov_rival_bridge/test_bridge.py
+python -m pytest -q research/ov_rival_bridge/test_bridge.py research/ov_rival_bridge/test_mechanism_isolation.py research/ov_rival_bridge/test_install.py
+python -m research.ov_rival_bridge.smoke_experiment
 ```
 
 Use a separate working tree and fresh output directory for each arm. On a server with the historical CAT-Seg environment and a **trusted** common complete pretrained checkpoint:
@@ -67,13 +69,13 @@ python train_ovrs.py \
   SEED 42
 ```
 
-For S/M/P, change `--rival-arm` and use distinct fresh outputs. Before any long run, perform a true CUDA 2-update smoke test and full-weight bypass equivalence verification. Reject a run whose new parameters are missing from the optimizer or a resume that fails checkpoint metadata verification. If using `--eval-only`, retain the required common base checkpoint for model construction and supply the candidate checkpoint with `--weights`; do not conflate common initializer with the candidate to be evaluated.
+For S/M/V/P, change `--rival-arm` and use distinct fresh outputs. Before any long run, perform a true CUDA 2-update smoke test and full-weight bypass equivalence verification. Reject a run whose new parameters are missing from the optimizer or a resume that fails checkpoint metadata verification. If using `--eval-only`, retain the required common base checkpoint for model construction and supply the candidate checkpoint with `--weights`; do not conflate common initializer with the candidate to be evaluated.
 
 **Note:** the existing train entry's eval path and checkpoint registration are reused rather than independently reimplemented. This branch has not yet been validated on the server or proven to load/restart a real new-arm checkpoint; use the smoke test as a gate.
 
 ## Scientific evaluation plan
 
-1. Compare Native A, Competition V1 B/C, and S/M/P/R on the identical OVRSIS95K source train/dev protocol. Select checkpoints using **only source dev**; record exact step and version. The prior C vs A external DLRSD gain was <1 pp on one seed and is not an established improvement.
+1. Compare Native A, Competition V1 B/C, and S/M/V/P/R on the identical OVRSIS95K source train/dev protocol. Select checkpoints using **only source dev**; record exact step and version. The prior C vs A external DLRSD gain was <1 pp on one seed and is not an established improvement.
 2. Inspect category-level change, class margins, gate/update statistics, per-image failure and correct-to-incorrect transitions. Specifically test whether rival feature contrast adds something beyond margin-conditioned spatial exchange (R vs M); test R vs P to determine whether spatial mixing is needed, while acknowledging unmatched capacity.
 3. If there is credible consistent gain, repeat >=3 seeds and evaluate on a new, independent external benchmark. The historical DLRSD 200-image development set has already influenced OV research decisions and cannot be treated as untouched test.
 4. Strong negative checks: R no better than M; improvement explained by larger update magnitude; added input class causing large output disturbance; performance concentrated in one class; ties/padding/truncation irregularities; unacceptable inference memory/latency.
