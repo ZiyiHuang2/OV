@@ -18,6 +18,7 @@ class RivalConditionedTransfer(nn.Module):
     Args:
         dim: channel dimension of CAT-Seg's cost embedding.
         arm: S=spatial evidence only, M=margin-conditioned spatial,
+             V=M attention + rival-relative Value message,
              R=margin-conditioned spatial + rival-relative feature messages,
              P=pointwise rival-relative control (no spatial transfer).
     Inputs:
@@ -26,11 +27,13 @@ class RivalConditionedTransfer(nn.Module):
     """
 
     def __init__(self, dim: int, arm: str = "R", *, rank: int = 24,
-                 attn_dim: int = 8, init_scale: float = 0.01):
+                 attn_dim: int = 8, init_scale: float = 0.01,
+                 debug_finite: bool = False):
         super().__init__()
-        if dim < 1 or rank < 1 or attn_dim < 1 or arm not in {"S", "M", "R", "P"}:
+        if dim < 1 or rank < 1 or attn_dim < 1 or arm not in {"S", "M", "V", "R", "P"}:
             raise ValueError("Invalid dim, rank, attn_dim, or arm")
         self.dim, self.arm, self.rank, self.attn_dim = dim, arm, rank, attn_dim
+        self.debug_finite = debug_finite
         self.norm = nn.LayerNorm(dim)
         self.query = nn.Conv2d(dim, attn_dim, 1, bias=False)
         self.key = nn.Conv2d(dim, attn_dim, 1, bias=False)
@@ -73,6 +76,13 @@ class RivalConditionedTransfer(nn.Module):
         bk, c, h, w = x.shape
         return F.unfold(x, 3, padding=1).reshape(bk, c, 9, h*w).permute(0, 3, 2, 1)
 
+    @staticmethod
+    def _masked_local_mean(x, valid):
+        """Mean over valid neighbors only; exclude invalid spatial pixels."""
+        numerator = F.avg_pool2d(x * valid, 3, stride=1, padding=1, count_include_pad=False)
+        denominator = F.avg_pool2d(valid.float(), 3, stride=1, padding=1, count_include_pad=False)
+        return numerator / denominator.clamp_min(1e-8)
+
     def forward(self, x, scores, class_mask=None, spatial_mask=None,
                 *, enabled: bool = True, return_aux: bool = False):
         if not enabled:
@@ -82,7 +92,9 @@ class RivalConditionedTransfer(nn.Module):
         b, d, k, h, w = x.shape
         if d != self.dim or scores.shape != (b, k, h, w) or x.device != scores.device:
             raise ValueError("Mismatched dimensions or devices")
-        if not x.is_floating_point() or not scores.is_floating_point() or not bool(torch.isfinite(x).all()) or not bool(torch.isfinite(scores).all()):
+        if not x.is_floating_point() or not scores.is_floating_point():
+            raise ValueError("Features and scores must be floats")
+        if self.debug_finite and (not bool(torch.isfinite(x).all()) or not bool(torch.isfinite(scores).all())):
             raise ValueError("Features and scores must be finite floats")
         valid_class = self._class_valid(scores, class_mask)
         if spatial_mask is None:
@@ -95,7 +107,7 @@ class RivalConditionedTransfer(nn.Module):
         opponent_id, margin, rival_present = self._rival(scores, valid_class)
         # Feature normalization is shared across categories and spatial locations.
         normalized = self.norm(x.permute(0, 2, 3, 4, 1)).permute(0, 4, 1, 2, 3)
-        if self.arm in {"R", "P"}:
+        if self.arm in {"V", "R", "P"}:
             opponent = normalized.gather(2, opponent_id[:, None].expand(-1, d, -1, -1, -1))
             relative = normalized - opponent
             relative = relative * rival_present[:, None, None, None, None]
@@ -107,8 +119,9 @@ class RivalConditionedTransfer(nn.Module):
         rel = flatten(relative)
         s = scores.float().reshape(b*k, 1, h, w)
         m = margin.reshape(b*k, 1, h, w) if self.arm != "S" else torch.zeros_like(s)
-        # Local margin variation describes potential decision boundaries.
-        local_mean = F.avg_pool2d(m, 3, stride=1, padding=1, count_include_pad=False)
+        vspace = valid_space[:, None].expand(b, k, h, w).reshape(b*k, 1, h, w)
+        # Invalid pixels must not perturb a neighboring valid center gate.
+        local_mean = self._masked_local_mean(m, vspace)
         control_features = torch.cat([s, m, m.abs(), (m - local_mean).abs()], dim=1)
         controlled = self.control(control_features)
         gate = F.hardsigmoid(controlled[:, 0:1])
@@ -135,7 +148,6 @@ class RivalConditionedTransfer(nn.Module):
             relation = torch.stack([si, sj, sj-si, mi, mj, (mj-mi).abs(), same_rival], dim=-1)
             pair_logits = self.pair(relation.to(self.pair[0].weight.dtype)).squeeze(-1).float()
 
-            vspace = valid_space[:, None].expand(b, k, h, w).reshape(b*k, 1, h, w)
             neighbor_ok = self._unfold_1(vspace.float()).squeeze(-1).bool()
             neighbor_ok[:, :, 4] = False
             neighbor_ok &= vspace.flatten(2).transpose(1, 2).bool()
@@ -152,7 +164,7 @@ class RivalConditionedTransfer(nn.Module):
                 return result.transpose(1, 2).reshape(b*k, self.rank, h, w)
 
             spatial_delta = local_delta(flat)
-            if self.arm == "R":
+            if self.arm in {"V", "R"}:
                 relative_delta = local_delta(rel)
                 delta = (1-mix.to(spatial_delta.dtype))*spatial_delta + mix.to(spatial_delta.dtype)*relative_delta
             else:
@@ -160,13 +172,13 @@ class RivalConditionedTransfer(nn.Module):
 
         update = self.out(delta).to(x.dtype) * gate.to(x.dtype) * self.alpha.to(x.dtype)
         active = (valid_class[:, :, None, None] & valid_space[:, None]).reshape(b*k, 1, h, w)
-        if self.arm in {"R", "P"}:
+        if self.arm in {"V", "R", "P"}:
             active &= rival_present[:, None, None, None].expand(b, k, h, w).reshape(b*k, 1, h, w)
         update = update * active.to(x.dtype)
         result = x + update.reshape(b, k, d, h, w).permute(0, 2, 1, 3, 4)
         if return_aux:
-            return result, {"bypassed": False, "gate_mean": gate.detach().mean(),
-                            "mix_mean": mix.detach().mean(),
+            return result, {"bypassed": False, "gate_mean": (gate.detach() * active).sum() / active.float().sum().clamp_min(1),
+                            "mix_mean": (mix.detach() * active).sum() / active.float().sum().clamp_min(1),
                             "update_rms": update.detach().float().square().mean().sqrt(),
                             "alpha": self.alpha.detach()}
         return result
