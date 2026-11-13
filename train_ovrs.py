@@ -118,6 +118,8 @@ class OVRSTrainer(Trainer):
                 install_rival(model, rival, initial_scale=cfg.MODEL.OVRS.RIVAL_SCALE,
                               rank=cfg.MODEL.OVRS.RIVAL_RANK,
                               attn_dim=cfg.MODEL.OVRS.RIVAL_ATTN_DIM)
+            from research.ov_rival_bridge.statistics import attach_statistics as attach_rival_statistics
+            attach_rival_statistics(model.sem_seg_head.predictor.transformer.rival_update)
         return model
 
     def __init__(self, cfg, *, run_directory, resume=False, allow_unverified=False):
