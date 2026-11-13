@@ -6,7 +6,7 @@ from .bridge import RivalConditionedTransfer
 
 
 def install(model, arm, *, initial_scale=0.01, rank=24, attn_dim=8):
-    if arm not in ("S", "M", "R", "P"):
+    if arm not in ("S", "M", "V", "R", "P"):
         raise ValueError("arm must be S/M/R/P")
     aggregator = model.sem_seg_head.predictor.transformer
     if not hasattr(aggregator, "layers") or not aggregator.layers:
