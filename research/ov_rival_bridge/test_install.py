@@ -38,7 +38,7 @@ class FakeModel(nn.Module):
         self.parameter = nn.Parameter(torch.ones(1))
 
 
-@pytest.mark.parametrize('arm', ['S', 'M', 'R', 'P'])
+@pytest.mark.parametrize('arm', ['S', 'M', 'V', 'R', 'P'])
 def test_installer_and_optimizer(arm):
     model = FakeModel()
     state_before = set(model.state_dict().keys())
