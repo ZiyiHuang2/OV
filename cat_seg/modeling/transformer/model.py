@@ -826,7 +826,18 @@ class Aggregator(nn.Module):
             projected_text_guidance = self.text_guidance_projection(text_feats)
 
         for layer_index, layer in enumerate(self.layers):
-            if layer_index == 0 and getattr(self, 'competition_update', None) is not None:
+            if layer_index == 0 and getattr(self, 'rival_update', None) is not None:
+                if getattr(self, 'competition_update', None) is not None:
+                    raise RuntimeError('Rival bridge and Competition V1 are mutually exclusive')
+                if getattr(layer, 'aggregation', 'serial') != 'serial' or getattr(layer, 'cost_context', None) is not None:
+                    raise RuntimeError('Rival bridge requires native serial aggregation without cost_context')
+                spatial = layer.swin_block(corr_embed, projected_guidance)
+                # Raw correlation after the host's optional top-k truncation.
+                # Single-prompt protocol required to avoid changing score semantics.
+                spatial = self.rival_update(spatial, corr.mean(dim=1),
+                                            enabled=not getattr(self, 'rival_bypass', False))
+                corr_embed = layer.attention(spatial, projected_text_guidance)
+            elif layer_index == 0 and getattr(self, 'competition_update', None) is not None:
                 if getattr(layer, 'aggregation', 'serial') != 'serial' or getattr(layer, 'cost_context', None) is not None:
                     raise RuntimeError('Competition V1 requires native serial aggregation without cost_context')
                 spatial = layer.swin_block(corr_embed, projected_guidance)

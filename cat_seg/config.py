@@ -98,6 +98,13 @@ def add_cat_seg_config(cfg):
     cfg.MODEL.OVRS.COMPETITION_BASE = ''
     cfg.MODEL.OVRS.COMPETITION_BASE_SHA256 = ''
     cfg.MODEL.OVRS.COMPETITION_SCALE = 0.01
+    # Independent rival-conditioned spatial transfer, off by default.
+    cfg.MODEL.OVRS.RIVAL_ARM = ''
+    cfg.MODEL.OVRS.RIVAL_BASE = ''
+    cfg.MODEL.OVRS.RIVAL_BASE_SHA256 = ''
+    cfg.MODEL.OVRS.RIVAL_SCALE = 0.01
+    cfg.MODEL.OVRS.RIVAL_RANK = 24
+    cfg.MODEL.OVRS.RIVAL_ATTN_DIM = 8
     cfg.MODEL.OVRS.AGGREGATION = 'serial'
     cfg.MODEL.OVRS.CONTEXT_ADAPTER = 'none'
     cfg.MODEL.OVRS.LSK_DILATION = 3

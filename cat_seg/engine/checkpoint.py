@@ -42,6 +42,10 @@ def model_config(cfg):
     if cfg.MODEL.OVRS.COMPETITION_ARM:
         keys += ('MODEL.OVRS.COMPETITION_ARM', 'MODEL.OVRS.COMPETITION_BASE_SHA256',
                  'MODEL.OVRS.COMPETITION_SCALE')
+    if cfg.MODEL.OVRS.RIVAL_ARM:
+        keys += ('MODEL.OVRS.RIVAL_ARM', 'MODEL.OVRS.RIVAL_BASE_SHA256',
+                 'MODEL.OVRS.RIVAL_SCALE', 'MODEL.OVRS.RIVAL_RANK',
+                 'MODEL.OVRS.RIVAL_ATTN_DIM')
     result = {}
     for key in keys:
         value = cfg
@@ -74,7 +78,9 @@ class OVRSCheckpointer(DetectionCheckpointer):
         if self.strict and self.expected_config is not None:
             metadata = checkpoint.get('ovrs_metadata')
             if metadata is None:
-                if self.expected_config.get('MODEL.OVRS.COMPETITION_ARM') or not self.allow_unverified:
+                if (self.expected_config.get('MODEL.OVRS.COMPETITION_ARM') or
+                        self.expected_config.get('MODEL.OVRS.RIVAL_ARM') or
+                        not self.allow_unverified):
                     raise ValueError(
                         'Checkpoint has no OVRS model configuration metadata. '
                         'For a verified legacy checkpoint, explicitly pass '
@@ -93,10 +99,15 @@ class OVRSCheckpointer(DetectionCheckpointer):
                 if changed:
                     raise ValueError('Checkpoint model configuration mismatch: ' + json.dumps(changed, sort_keys=True))
         incompatible = super()._load_model(checkpoint)
-        if not self.strict and self.expected_config and self.expected_config.get('MODEL.OVRS.COMPETITION_ARM'):
-            expected = {k for k in self.model.state_dict() if '.competition_update.' in k}
-            if set(incompatible.missing_keys) != expected or incompatible.unexpected_keys or incompatible.incorrect_shapes:
-                raise ValueError(f'Invalid competition initialization: {incompatible}')
+        if not self.strict and self.expected_config:
+            arm = self.expected_config.get('MODEL.OVRS.COMPETITION_ARM')
+            rival = self.expected_config.get('MODEL.OVRS.RIVAL_ARM')
+            if arm or rival:
+                prefix = '.competition_update.' if arm else '.rival_update.'
+                expected = {k for k in self.model.state_dict() if prefix in k}
+                if (set(incompatible.missing_keys) != expected or
+                        incompatible.unexpected_keys or incompatible.incorrect_shapes):
+                    raise ValueError(f'Invalid optional module initialization: {incompatible}')
         if self.strict and (incompatible.missing_keys or incompatible.unexpected_keys or incompatible.incorrect_shapes):
             raise ValueError(
                 'Checkpoint does not match the evaluation architecture or resume model. '

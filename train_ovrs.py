@@ -108,6 +108,18 @@ class OVRSTrainer(Trainer):
             if arm != 'A':
                 from research.ov_competition_v1.statistics import attach_statistics
                 attach_statistics(model.sem_seg_head.predictor.transformer.competition_update)
+        rival = cfg.MODEL.OVRS.RIVAL_ARM
+        if rival:
+            from research.ov_rival_bridge.install import install as install_rival
+            checkpoint = torch.load(cfg.MODEL.OVRS.RIVAL_BASE, map_location='cpu', weights_only=False)
+            model.load_state_dict(checkpoint.get('model', checkpoint), strict=True)
+            with torch.random.fork_rng(devices=list(range(torch.cuda.device_count()))):
+                torch.manual_seed(cfg.SEED)
+                install_rival(model, rival, initial_scale=cfg.MODEL.OVRS.RIVAL_SCALE,
+                              rank=cfg.MODEL.OVRS.RIVAL_RANK,
+                              attn_dim=cfg.MODEL.OVRS.RIVAL_ATTN_DIM)
+            from research.ov_rival_bridge.statistics import attach_statistics as attach_rival_statistics
+            attach_rival_statistics(model.sem_seg_head.predictor.transformer.rival_update)
         return model
 
     def __init__(self, cfg, *, run_directory, resume=False, allow_unverified=False):
@@ -128,7 +140,7 @@ class OVRSTrainer(Trainer):
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
-        if output_folder is None and cfg.MODEL.OVRS.COMPETITION_ARM:
+        if output_folder is None and (cfg.MODEL.OVRS.COMPETITION_ARM or cfg.MODEL.OVRS.RIVAL_ARM):
             from detectron2.utils.events import get_event_storage
             try:
                 event_iter = get_event_storage().iter
@@ -137,7 +149,7 @@ class OVRSTrainer(Trainer):
                 output_folder = str(Path(cfg.OUTPUT_DIR) / 'inference' / 'final')
         return SeenUnseenEvaluator(
             dataset_name, distributed=True,
-            collect_samples=bool(cfg.MODEL.OVRS.COMPETITION_ARM),
+            collect_samples=bool(cfg.MODEL.OVRS.COMPETITION_ARM or cfg.MODEL.OVRS.RIVAL_ARM),
             output_dir=output_folder or str(Path(cfg.OUTPUT_DIR) / 'inference'),
         )
 
@@ -165,6 +177,8 @@ def setup(args):
     if args.max_iter is not None:
         cfg.SOLVER.MAX_ITER = args.max_iter
     cfg.merge_from_list(args.opts)
+    if args.competition_arm and args.rival_arm:
+        raise ValueError('Competition V1 and rival bridge are mutually exclusive')
     if args.competition_arm:
         cfg.MODEL.OVRS.COMPETITION_ARM = args.competition_arm
         if not args.competition_base_weights:
@@ -184,6 +198,30 @@ def setup(args):
             raise ValueError('Competition V1 requires native serial aggregation and single prompt')
     elif args.competition_base_weights:
         raise ValueError('--competition-base-weights requires --competition-arm')
+    if args.rival_arm:
+        cfg.MODEL.OVRS.RIVAL_ARM = args.rival_arm
+        if not args.rival_base_weights:
+            raise ValueError('Rival bridge requires --rival-base-weights')
+        base = Path(args.rival_base_weights).resolve()
+        if not base.is_file():
+            raise FileNotFoundError(base)
+        cfg.MODEL.OVRS.RIVAL_BASE = str(base)
+        with base.open('rb') as f:
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: f.read(8 * 1024 * 1024), b''):
+                digest.update(chunk)
+            cfg.MODEL.OVRS.RIVAL_BASE_SHA256 = digest.hexdigest()
+        if not args.eval_only and not args.resume and str(Path(cfg.MODEL.WEIGHTS).resolve()) != str(base):
+            raise ValueError('Rival training weights must equal --rival-base-weights')
+        if (cfg.MODEL.OVRS.AGGREGATION != 'serial' or
+                cfg.MODEL.OVRS.CONTEXT_ADAPTER != 'none' or
+                cfg.MODEL.OVRS.CAD_STAGES or
+                cfg.MODEL.PROMPT_ENSEMBLE_TYPE != 'single'):
+            raise ValueError('Rival bridge requires native serial aggregation and single prompt')
+        if cfg.MODEL.OVRS.RIVAL_RANK < 1 or cfg.MODEL.OVRS.RIVAL_ATTN_DIM < 1:
+            raise ValueError('Rival rank and attention dimensions must be positive')
+    elif args.rival_base_weights:
+        raise ValueError('--rival-base-weights requires --rival-arm')
     cfg.OUTPUT_DIR = str(Path(cfg.OUTPUT_DIR).resolve())
     if cfg.MODEL.SEM_SEG_HEAD.CLIP_PRETRAINED != 'ViT-B/16':
         raise ValueError('This RS runner supports the tested OpenAI CLIP ViT-B/16 path')
@@ -234,6 +272,8 @@ def make_parser():
     parser.add_argument('--weights')
     parser.add_argument('--competition-arm', choices=('A', 'B', 'C'))
     parser.add_argument('--competition-base-weights')
+    parser.add_argument('--rival-arm', choices=('S', 'M', 'V', 'R', 'P'))
+    parser.add_argument('--rival-base-weights')
     parser.add_argument('--output')
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--max-iter', type=int)
