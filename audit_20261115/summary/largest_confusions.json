@@ -1,0 +1,387 @@
+{
+  "A": [
+    {
+      "truth": "grass",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 142117960
+    },
+    {
+      "truth": "tree",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 134408349
+    },
+    {
+      "truth": "grass",
+      "predicted": "agriculture land",
+      "pixels": 87119800
+    },
+    {
+      "truth": "road",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 81591460
+    },
+    {
+      "truth": "building",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 69953750
+    },
+    {
+      "truth": "tree",
+      "predicted": "grass",
+      "pixels": 65209056
+    },
+    {
+      "truth": "grass",
+      "predicted": "tree",
+      "pixels": 45129046
+    },
+    {
+      "truth": "developed space",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 42315027
+    },
+    {
+      "truth": "rangeland",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 41923273
+    },
+    {
+      "truth": "agriculture land",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 36506225
+    },
+    {
+      "truth": "water",
+      "predicted": "grass",
+      "pixels": 35213601
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "road",
+      "pixels": 34614432
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "building",
+      "pixels": 33973450
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "grass",
+      "pixels": 32221619
+    },
+    {
+      "truth": "water",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 31951931
+    }
+  ],
+  "C": [
+    {
+      "truth": "grass",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 142917448
+    },
+    {
+      "truth": "tree",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 135203866
+    },
+    {
+      "truth": "grass",
+      "predicted": "agriculture land",
+      "pixels": 86517671
+    },
+    {
+      "truth": "road",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 81987089
+    },
+    {
+      "truth": "building",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 69993179
+    },
+    {
+      "truth": "tree",
+      "predicted": "grass",
+      "pixels": 64919824
+    },
+    {
+      "truth": "grass",
+      "predicted": "tree",
+      "pixels": 44773513
+    },
+    {
+      "truth": "developed space",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 42281000
+    },
+    {
+      "truth": "rangeland",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 42018551
+    },
+    {
+      "truth": "agriculture land",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 36603440
+    },
+    {
+      "truth": "water",
+      "predicted": "grass",
+      "pixels": 35677842
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "road",
+      "pixels": 34459745
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "building",
+      "pixels": 33798331
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "grass",
+      "pixels": 32480912
+    },
+    {
+      "truth": "water",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 32077564
+    }
+  ],
+  "M": [
+    {
+      "truth": "grass",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 142581030
+    },
+    {
+      "truth": "tree",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 135082260
+    },
+    {
+      "truth": "grass",
+      "predicted": "agriculture land",
+      "pixels": 85904773
+    },
+    {
+      "truth": "road",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 81487504
+    },
+    {
+      "truth": "building",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 70201188
+    },
+    {
+      "truth": "tree",
+      "predicted": "grass",
+      "pixels": 65001196
+    },
+    {
+      "truth": "grass",
+      "predicted": "tree",
+      "pixels": 45268239
+    },
+    {
+      "truth": "developed space",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 42392217
+    },
+    {
+      "truth": "rangeland",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 42065900
+    },
+    {
+      "truth": "agriculture land",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 36539301
+    },
+    {
+      "truth": "water",
+      "predicted": "grass",
+      "pixels": 35538710
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "road",
+      "pixels": 34925424
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "building",
+      "pixels": 33740811
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "grass",
+      "pixels": 32435726
+    },
+    {
+      "truth": "water",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 32022286
+    }
+  ],
+  "V": [
+    {
+      "truth": "grass",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 142852461
+    },
+    {
+      "truth": "tree",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 135252420
+    },
+    {
+      "truth": "grass",
+      "predicted": "agriculture land",
+      "pixels": 84983160
+    },
+    {
+      "truth": "road",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 81663360
+    },
+    {
+      "truth": "building",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 70217692
+    },
+    {
+      "truth": "tree",
+      "predicted": "grass",
+      "pixels": 65329581
+    },
+    {
+      "truth": "grass",
+      "predicted": "tree",
+      "pixels": 44841298
+    },
+    {
+      "truth": "developed space",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 42527932
+    },
+    {
+      "truth": "rangeland",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 41819620
+    },
+    {
+      "truth": "agriculture land",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 36425848
+    },
+    {
+      "truth": "water",
+      "predicted": "grass",
+      "pixels": 35565187
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "road",
+      "pixels": 34667427
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "building",
+      "pixels": 33780163
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "grass",
+      "pixels": 32537453
+    },
+    {
+      "truth": "water",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 32195518
+    }
+  ],
+  "R": [
+    {
+      "truth": "grass",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 142543073
+    },
+    {
+      "truth": "tree",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 135318171
+    },
+    {
+      "truth": "grass",
+      "predicted": "agriculture land",
+      "pixels": 87239854
+    },
+    {
+      "truth": "road",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 81727172
+    },
+    {
+      "truth": "building",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 69969614
+    },
+    {
+      "truth": "tree",
+      "predicted": "grass",
+      "pixels": 64641390
+    },
+    {
+      "truth": "grass",
+      "predicted": "tree",
+      "pixels": 44580438
+    },
+    {
+      "truth": "developed space",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 42508459
+    },
+    {
+      "truth": "rangeland",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 42046961
+    },
+    {
+      "truth": "agriculture land",
+      "predicted": "unlabeled areas, background, clutter",
+      "pixels": 36641879
+    },
+    {
+      "truth": "water",
+      "predicted": "grass",
+      "pixels": 35799098
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "road",
+      "pixels": 34621604
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "building",
+      "pixels": 33792957
+    },
+    {
+      "truth": "unlabeled areas, background, clutter",
+      "predicted": "grass",
+      "pixels": 32561197
+    },
+    {
+      "truth": "agriculture land",
+      "predicted": "grass",
+      "pixels": 32230586
+    }
+  ]
+}

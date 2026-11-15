@@ -1,0 +1,26 @@
+{
+  "scope": "First 100 source-dev images, coarse native feature grid; descriptive post-hoc diagnostic",
+  "margin": "absolute ground-truth-class score minus its strongest rival score; median split",
+  "margin_median": 0.052051983773708344,
+  "high_competition": {
+    "cells": 28800,
+    "corrected": 49,
+    "regressed": 61
+  },
+  "low_competition": {
+    "cells": 28800,
+    "corrected": 36,
+    "regressed": 44
+  },
+  "rival_switch": "at least one adjacent valid same-GT-class cell has a different GT-class rival",
+  "switch": {
+    "cells": 35696,
+    "corrected": 54,
+    "regressed": 78
+  },
+  "no_switch": {
+    "cells": 21904,
+    "corrected": 31,
+    "regressed": 27
+  }
+}

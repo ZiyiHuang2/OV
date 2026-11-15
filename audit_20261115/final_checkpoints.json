@@ -1,0 +1,12 @@
+{
+  "server_root": "/home/wangchengjun/huangziyi/experiments/rct_2k_bb38fff_20261115",
+  "filename_per_arm": "model_final.pth",
+  "verified_against_temporary_original": true,
+  "sha256": {
+    "A": "b93407b7bc9b26b09f845775fe5cc704ae6dbe59f99cf5e6eb563289dd4748c3",
+    "C": "7bd942f14d0770d31d2549e1fe994f1a7648c270177a163a806e065e1a30367b",
+    "M": "3ffa440dad178bd38ea9f7e07d3776f7bb23b12b70c2388a5052acbaecc78a4c",
+    "V": "887e7f3897416cba84c72a90e3a40d8adeb29eec5ebce2759c3b16de0fa2b7e0",
+    "R": "d28a11ced15f300f5242551cf96158757f301baa1ec18146b90f8b7183f68c16"
+  }
+}

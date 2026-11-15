@@ -1,0 +1,189 @@
+{
+  "missing_optimizer": [],
+  "steps": [
+    {
+      "sem_seg_head.predictor.transformer.rival_update.alpha": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 2.3456794224330224e-05,
+        "update_norm": 7.096678018569946e-07
+      },
+      "sem_seg_head.predictor.transformer.rival_update.norm.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 5.477349418470112e-07,
+        "update_norm": 2.0409346689120866e-05
+      },
+      "sem_seg_head.predictor.transformer.rival_update.norm.bias": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 2.29265012308133e-07,
+        "update_norm": 8.889387572708074e-06
+      },
+      "sem_seg_head.predictor.transformer.rival_update.query.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 3.891890173690626e-06,
+        "update_norm": 0.0001352774997940287
+      },
+      "sem_seg_head.predictor.transformer.rival_update.key.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 3.1804841000848683e-06,
+        "update_norm": 0.0001119668668252416
+      },
+      "sem_seg_head.predictor.transformer.rival_update.value.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 1.0114319593412802e-05,
+        "update_norm": 0.0003357986861374229
+      },
+      "sem_seg_head.predictor.transformer.rival_update.pair.0.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 5.0998071543517653e-08,
+        "update_norm": 2.084355401166249e-06
+      },
+      "sem_seg_head.predictor.transformer.rival_update.pair.0.bias": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 1.7876530478133645e-08,
+        "update_norm": 7.850734391467995e-07
+      },
+      "sem_seg_head.predictor.transformer.rival_update.pair.2.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 6.376915706596264e-08,
+        "update_norm": 2.7526600661076372e-06
+      },
+      "sem_seg_head.predictor.transformer.rival_update.pair.2.bias": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 2.7478019859472624e-15,
+        "update_norm": 0.0
+      },
+      "sem_seg_head.predictor.transformer.rival_update.control.0.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 1.5083289284234525e-08,
+        "update_norm": 4.2405159206282406e-07
+      },
+      "sem_seg_head.predictor.transformer.rival_update.control.0.bias": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 2.213396754768837e-08,
+        "update_norm": 1.7505891491964576e-07
+      },
+      "sem_seg_head.predictor.transformer.rival_update.control.2.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 3.953067562179058e-08,
+        "update_norm": 5.829347173857968e-07
+      },
+      "sem_seg_head.predictor.transformer.rival_update.control.2.bias": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 7.25096995779495e-08,
+        "update_norm": 5.4016709327697754e-08
+      },
+      "sem_seg_head.predictor.transformer.rival_update.out.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 5.642032192554325e-06,
+        "update_norm": 0.0001954446779564023
+      }
+    },
+    {
+      "sem_seg_head.predictor.transformer.rival_update.alpha": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 7.405308224406326e-06,
+        "update_norm": 1.4001503586769104e-05
+      },
+      "sem_seg_head.predictor.transformer.rival_update.norm.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 3.969682040860789e-07,
+        "update_norm": 1.814763163565658e-05
+      },
+      "sem_seg_head.predictor.transformer.rival_update.norm.bias": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 1.3937685139353562e-07,
+        "update_norm": 7.730492143309675e-06
+      },
+      "sem_seg_head.predictor.transformer.rival_update.query.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 2.4682262846908998e-06,
+        "update_norm": 0.00011556396202649921
+      },
+      "sem_seg_head.predictor.transformer.rival_update.key.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 1.953889068317949e-06,
+        "update_norm": 9.373737702844664e-05
+      },
+      "sem_seg_head.predictor.transformer.rival_update.value.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 7.898641342762858e-06,
+        "update_norm": 0.00030706721008755267
+      },
+      "sem_seg_head.predictor.transformer.rival_update.pair.0.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 2.872605620041213e-08,
+        "update_norm": 1.7532014453536249e-06
+      },
+      "sem_seg_head.predictor.transformer.rival_update.pair.0.bias": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 1.2812150451679827e-08,
+        "update_norm": 7.022147769930598e-07
+      },
+      "sem_seg_head.predictor.transformer.rival_update.pair.2.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 4.4223295248002614e-08,
+        "update_norm": 2.4176883925974835e-06
+      },
+      "sem_seg_head.predictor.transformer.rival_update.pair.2.bias": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 4.40619762898109e-15,
+        "update_norm": 0.0
+      },
+      "sem_seg_head.predictor.transformer.rival_update.control.0.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 3.126162662070442e-09,
+        "update_norm": 2.936580472123751e-07
+      },
+      "sem_seg_head.predictor.transformer.rival_update.control.0.bias": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 7.968251836132367e-09,
+        "update_norm": 2.0908969133870414e-07
+      },
+      "sem_seg_head.predictor.transformer.rival_update.control.2.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 1.4077594201467036e-08,
+        "update_norm": 5.181042297408567e-07
+      },
+      "sem_seg_head.predictor.transformer.rival_update.control.2.bias": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 2.3208009736208624e-08,
+        "update_norm": 4.023313522338867e-07
+      },
+      "sem_seg_head.predictor.transformer.rival_update.out.weight": {
+        "gradient_present": true,
+        "gradient_finite": true,
+        "gradient_norm": 4.419111064635217e-06,
+        "update_norm": 0.00018031425133813173
+      }
+    }
+  ]
+}
