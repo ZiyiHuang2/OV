@@ -1,0 +1,9 @@
+{
+  "sample": "/home/wangchengjun/huangziyi/ov_competition_v1_20261030_audit/data_ovrsis95k_rev39c3def/train/img/OVRSISBenchv2_002208.jpg",
+  "classes": 35,
+  "precision": "FP32; matmul high",
+  "strict_checkpoint_load": true,
+  "max_abs_error": 0.0,
+  "mean_abs_error": 0.0,
+  "pass_at_1e-6": true
+}

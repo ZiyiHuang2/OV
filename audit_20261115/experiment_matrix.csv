@@ -1,0 +1,6 @@
+arm,train_steps,seed,batch,learning_rate,precision,training_manifest,selection
+A,2000,42,4,0.0001,FP32,frozen_split_seed42_v2,final step
+C,2000,42,4,0.0001,FP32,frozen_split_seed42_v2,final step
+M,2000,42,4,0.0001,FP32,frozen_split_seed42_v2,final step
+V,2000,42,4,0.0001,FP32,frozen_split_seed42_v2,final step
+R,2000,42,4,0.0001,FP32,frozen_split_seed42_v2,final step

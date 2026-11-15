@@ -1,0 +1,11 @@
+{
+  "dataset_revision_recorded_in_historical_protocol": "39c3defb79ec03cfe6e53948e0735ad692ff5b25",
+  "data_root": "/home/wangchengjun/huangziyi/ov_competition_v1_20261030_audit/data_ovrsis95k_rev39c3def",
+  "manifest": "/home/wangchengjun/huangziyi/ov_competition_v1_20261030_audit/frozen_split_seed42_v2/manifest.json",
+  "manifest_sha256": "ccbd48a21ebd97e713ee6ebb001aa69ff50971f51a76d1320f6da0577cc40e3d",
+  "class_json_sha256": "0073371b8450608a1702ecab22939fc60ba24222d2dea1e434047a100e463f41",
+  "train_samples": 88754,
+  "source_dev_samples": 4700,
+  "classes": 35,
+  "historical_audit_caveats": "SHA256/dHash grouped split; no exact overlap reported; 32 distance-4 candidate pairs unverified; geographic independence unknown; 3576 exact-image groups with differing masks retained in training but excluded from dev; official val excluded after 142 image hash overlaps with original train. These are historical audit findings, not freshly repeated full-data scans."
+}

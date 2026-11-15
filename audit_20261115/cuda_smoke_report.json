@@ -1,0 +1,10 @@
+{
+  "scope": "Real Detectron2 OVRSTrainer, real OVRSIS95K train examples; two FP32 optimizer steps per M/V/R. Two-image dev only for software smoke, never formal performance.",
+  "full_model_parity": {"classes": 35, "sample_count": 1, "max_abs_error": 0.0, "mean_abs_error": 0.0, "checkpoint_strict_load": true, "threshold": 1e-6},
+  "optimizer": {"arms": ["M", "V", "R"], "missing_registered_parameters": 0, "recorded_gradients_finite": true, "note": "Channel audit: M gate nonzero/mix zero as designed, V and R gate/mix nonzero; same-rival relation input gradient zero in M/V and nonzero in R. Output pair bias has near-zero gradient, consistent with a common softmax-logit shift."},
+  "two_step_total_loss": {"M": 0.07176656648516655, "V": 0.07177823409438133, "R": 0.07177424058318138},
+  "peak_memory_mib": {"M": 12749, "V": 12871, "R": 12871},
+  "resume": "10-step schedule interrupted immediately after checkpoint at iteration 1, resumed at iteration 2; two additional updates with nonzero parameter changes and checkpoint at iteration 3. Intentional AUDIT_STOP_AFTER_CHECKPOINT exceptions in logs.",
+  "eval_only": "V checkpoint evaluated twice on two source-dev images with the same output root; separate run directories and per_image.jsonl files were created.",
+  "limitations": ["No AMP test; historical and current selected training protocol is FP32.", "Full 4700-image arm comparison was not established by this smoke.", "Temporary server files are volatile; portable small logs copied locally."]
+}

@@ -1,0 +1,7 @@
+{
+  "path": "/home/wangchengjun/huangziyi/open-ov/asset_store/checkpoints/cat_seg/model_base.pth",
+  "sha256": "a201a50f94f4c04196e3083773832b736c2b8b81d27ea2c59cc13af3aff05760",
+  "sha256_freshly_checked": true,
+  "historical_key_audit": {"model_keys": 484, "checkpoint_keys": 484, "missing": [], "unexpected": [], "shape_mismatches": {}},
+  "current_strict_load": "passed during complete model parity check"
+}

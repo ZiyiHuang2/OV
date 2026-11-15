@@ -1,0 +1,16 @@
+{
+  "observed_at": "2026-11-15 Asia/Shanghai",
+  "server": "h3c-H3C-UniServer-R4900-G5",
+  "user": "wangchengjun",
+  "python": "3.10.14",
+  "torch": "2.5.1+cu121",
+  "cuda_runtime": "12.1",
+  "driver": "580.159.03",
+  "detectron2": "0.6",
+  "gpu": "NVIDIA GeForce RTX 4090, 24564 MiB, CUDA_VISIBLE_DEVICES=0",
+  "root_disk_free_at_audit": "approximately 4.1 GiB; 100% reported",
+  "temporary_output_root": "/tmp/ov-rct-validation-20261115",
+  "temporary_output_warning": "tmpfs; volatile and not a durable archive",
+  "local_repository": "E:/FOR_CODEX/OV-rct-experiment-20261115",
+  "source_commit": "bb38fffd79bec940be3fb9d01555f14841060c63"
+}
