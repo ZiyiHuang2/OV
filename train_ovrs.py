@@ -3,6 +3,7 @@
 import json
 import hashlib
 import logging
+import os
 from pathlib import Path
 import weakref
 
@@ -11,7 +12,7 @@ from PIL import Image
 import torch
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
-from detectron2.engine import default_argument_parser, launch
+from detectron2.engine import default_argument_parser, launch, hooks
 from detectron2.evaluation import SemSegEvaluator
 from detectron2.projects.deeplab import add_deeplab_config
 from detectron2.utils import comm
@@ -37,13 +38,19 @@ def harmonic_iou(seen, unseen):
 
 
 class SeenUnseenEvaluator(SemSegEvaluator):
-    def __init__(self, dataset_name, *, collect_samples=False, **kwargs):
+    def __init__(self, dataset_name, *, collect_samples=False, compact=False, **kwargs):
         super().__init__(dataset_name, **kwargs)
+        self.compact = compact
         metadata = MetadataCatalog.get(dataset_name)
         self.names = metadata.stuff_classes
         self.seen_ids = set(metadata.seen_class_ids)
         self.collect_samples = collect_samples
         self.sample_records = []
+
+    def encode_json_sem_seg(self, sem_seg, input_file_name):
+        if self.compact:
+            return []
+        return super().encode_json_sem_seg(sem_seg, input_file_name)
 
     def reset(self):
         super().reset()
@@ -77,6 +84,9 @@ class SeenUnseenEvaluator(SemSegEvaluator):
                         f.write(json.dumps(row) + '\n')
             with (out / 'confusion_matrix.npy').open('xb') as f:
                 np.save(f, self._conf_matrix)
+        elif self.compact and result is not None and self._output_dir:
+            with (Path(self._output_dir) / 'confusion_matrix.npy').open('xb') as f:
+                np.save(f, self._conf_matrix)
         if result is None:
             return None
         metrics = result['sem_seg']
@@ -91,6 +101,53 @@ class SeenUnseenEvaluator(SemSegEvaluator):
         metrics['hIoU'] = harmonic_iou(seen, unseen)
         logging.getLogger(__name__).info('Seen/unseen metrics: %s', metrics)
         return result
+
+
+class CompactBestHook(hooks.HookBase):
+    """Keep the best evaluated checkpoint without changing the resume pointer."""
+    def __init__(self, output_dir, period):
+        self.directory = Path(output_dir)
+        self.period = period
+        self.state_file = self.directory / 'best_checkpoint.json'
+        self.best = json.loads(self.state_file.read_text()) if self.state_file.exists() else None
+
+    def after_step(self):
+        step = self.trainer.iter + 1
+        if step == self.trainer.max_iter or step % self.period:
+            return
+        self._select(step)
+
+    def after_train(self):
+        if self.trainer.iter == self.trainer.max_iter:
+            self._select(self.trainer.max_iter)
+            duplicate = self.directory / f'model_{self.trainer.max_iter - 1:07d}.pth'
+            final = self.directory / 'model_final.pth'
+            if final.is_file() and Path(self.trainer.checkpointer.get_checkpoint_file()) == final:
+                duplicate.unlink(missing_ok=True)
+
+    def _select(self, step):
+        metric, iteration = self.trainer.storage.latest()['sem_seg/mIoU']
+        if iteration not in (self.trainer.iter, step) or not np.isfinite(metric):
+            raise RuntimeError('Missing current source-dev mIoU for checkpoint selection')
+        if self.best is not None and metric <= self.best['miou']:
+            return
+        source = Path(self.trainer.checkpointer.get_checkpoint_file())
+        if not source.is_file():
+            raise RuntimeError('No current checkpoint for source-dev selection')
+        name = f'best_iter_{step:07d}.pth'
+        temporary = self.directory / (name + '.tmp')
+        destination = self.directory / name
+        # Both files are in the same run directory; retain an immutable inode
+        # without duplicating the large checkpoint when best equals latest.
+        os.link(source, temporary)
+        os.replace(temporary, destination)
+        old = self.best
+        self.best = {'step': step, 'miou': float(metric), 'checkpoint': name}
+        tmp_state = self.state_file.with_suffix('.json.tmp')
+        tmp_state.write_text(json.dumps(self.best, indent=2))
+        os.replace(tmp_state, self.state_file)
+        if old and old['checkpoint'] != name:
+            (self.directory / old['checkpoint']).unlink(missing_ok=True)
 
 
 class OVRSTrainer(Trainer):
@@ -136,7 +193,21 @@ class OVRSTrainer(Trainer):
             allow_unverified=self.allow_unverified,
             provenance=json.loads((self.run_directory / 'run_provenance.json').read_text()),
         )
-        return super().build_hooks()
+        built = super().build_hooks()
+        if self.cfg.MODEL.OVRS.COMPACT_OUTPUT and comm.is_main_process():
+            if self.cfg.TEST.EVAL_PERIOD <= 0 or self.cfg.TEST.EVAL_PERIOD != self.cfg.SOLVER.CHECKPOINT_PERIOD:
+                raise ValueError('Compact output requires matching positive evaluation and checkpoint periods')
+            for i, hook in enumerate(built):
+                if isinstance(hook, hooks.PeriodicCheckpointer):
+                    replacement = hooks.PeriodicCheckpointer(self.checkpointer, self.cfg.SOLVER.CHECKPOINT_PERIOD, max_to_keep=1)
+                    last = self.checkpointer.get_checkpoint_file()
+                    if last and Path(last).name.startswith('model_') and not last.endswith('model_final.pth'):
+                        replacement.recent_checkpoints = [last]
+                    built[i] = replacement
+                if isinstance(hook, hooks.EvalHook):
+                    built.insert(i + 1, CompactBestHook(self.cfg.OUTPUT_DIR, self.cfg.TEST.EVAL_PERIOD))
+                    break
+        return built
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
@@ -149,7 +220,8 @@ class OVRSTrainer(Trainer):
                 output_folder = str(Path(cfg.OUTPUT_DIR) / 'inference' / 'final')
         return SeenUnseenEvaluator(
             dataset_name, distributed=True,
-            collect_samples=bool(cfg.MODEL.OVRS.COMPETITION_ARM or cfg.MODEL.OVRS.RIVAL_ARM),
+            collect_samples=bool(cfg.MODEL.OVRS.COMPETITION_ARM or cfg.MODEL.OVRS.RIVAL_ARM) and not cfg.MODEL.OVRS.COMPACT_OUTPUT,
+            compact=cfg.MODEL.OVRS.COMPACT_OUTPUT,
             output_dir=output_folder or str(Path(cfg.OUTPUT_DIR) / 'inference'),
         )
 
