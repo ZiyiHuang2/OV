@@ -105,6 +105,7 @@ def add_cat_seg_config(cfg):
     cfg.MODEL.OVRS.RIVAL_SCALE = 0.01
     cfg.MODEL.OVRS.RIVAL_RANK = 24
     cfg.MODEL.OVRS.RIVAL_ATTN_DIM = 8
+    cfg.MODEL.OVRS.COMPACT_OUTPUT = False
     cfg.MODEL.OVRS.AGGREGATION = 'serial'
     cfg.MODEL.OVRS.CONTEXT_ADAPTER = 'none'
     cfg.MODEL.OVRS.LSK_DILATION = 3
