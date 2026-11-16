@@ -1,0 +1,5 @@
+# Reproducibility
+
+Server root: /home/wangchengjun/huangziyi/experiments/rct_v1_closeout_20261116. Repo: /home/wangchengjun/huangziyi/experiments/rct_40k_20261115/repo, commit 16ab4ddd410d46ef31349bca717335bbb5638605 (same tree as PR 5 head fe6295e8d1d951660aac31bce22684493378cf62). Historical Base/C commit 4308cc137bbf8220a3fb0e8c9ce2e44035c06a6f. Python /home/wangchengjun/miniconda3/envs/ovrs/bin/python, PyTorch 2.5.1+cu121; Detectron2 1e3e13bbf607b54f62205c4c33922521822fb298. Inference FP32 and torch float32 matmul precision high.
+
+Paths and checkpoint hashes: checkpoint_manifest.json. Frozen IDs and rules: diagnostic_plan.json; threshold: frozen_threshold.json. From the repo set CUDA_VISIBLE_DEVICES=1, OMP_NUM_THREADS=2, MKL_NUM_THREADS=2 and PYTHONPATH=., then invoke the Python above on closeout/infer.py with A, M, V and R, followed by analyze.py and class_analysis.py. Inference refuses to overwrite predictions. To repeat safely, copy scripts, plan and checkpoint manifest to a fresh directory and change the hard-coded closeout root in each script. No large weights or predictions are committed.

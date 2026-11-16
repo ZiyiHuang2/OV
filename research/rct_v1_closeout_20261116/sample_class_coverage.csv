@@ -1,0 +1,36 @@
+class,pixels,images
+airplane,498305,54
+airport,9681279,34
+baseball field,960381,17
+basketball court,296379,15
+bridge,128755,18
+chimney,164901,4
+expressway service area,926426,7
+expressway toll station,1298653,19
+dam,75483,6
+golf field,466459,13
+ground track field,442258,18
+harbor,1540377,35
+overpass,422620,13
+ship,1221668,68
+stadium,140950,9
+storage tank,136946,13
+tennis court,372594,24
+train station,28800,1
+vehicle,1657824,222
+windmill,0,0
+soccer ball field,167092,6
+roundabout,25280,9
+container crane,10127,3
+helipad,69298,6
+building,19362493,193
+road,21956632,212
+water,33782467,121
+tree,28837819,151
+grass,63874248,215
+bareland,176677,6
+rangeland,5628565,35
+developed space,2364916,24
+agriculture land,13838864,43
+intersection,75208,25
+"unlabeled areas, background, clutter",56269544,280
