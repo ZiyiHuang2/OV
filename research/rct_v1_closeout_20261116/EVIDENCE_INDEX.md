@@ -1,0 +1,7 @@
+# Evidence index
+
+- Results: results_40k.csv; originals <arm>/metrics.json and inference/event_iter_0040000/confusion_matrix.npy under /home/wangchengjun/huangziyi/experiments/rct_40k_20261115 for M/V/R and /home/wangchengjun/huangziyi/ov_competition_v1_20261030_audit/formal_20261101_seed42 for A/C.
+- Weights, SHA256, config and repo commit: checkpoint_manifest.json; initializer SHA256 a201a50f94f4c04196e3083773832b736c2b8b81d27ea2c59cc13af3aff05760; manifest ccbd48a21ebd97e713ee6ebb001aa69ff50971f51a76d1320f6da0577cc40e3d; class vocabulary 0073371b8450608a1702ecab22939fc60ba24222d2dea1e434047a100e463f41.
+- Frozen protocol diagnostic_plan.json and frozen_threshold.json; inference predictions/{A,M,V,R}, infer_*.log and infer.py; full-pixel paired_per_image.csv, paired_full_pixel_summary.csv, paired_class_per_image.csv, paired_class_summary.csv and error_transitions.csv; grid strata strata_per_image.csv and paired_analysis.csv; scripts analyze.py and class_analysis.py.
+- Prior 40k evidence /home/wangchengjun/huangziyi/experiments/rct_40k_20261115/{acceptance_report.json,formal_status.json,historical_reference_audit.json}; 40k prior bypass analysis_40k/{M,V,R}.json. 2k evidence /home/wangchengjun/huangziyi/experiments/rct_2k_bb38fff_20261115/{EXPERIMENT_REPORT.md,cuda_smoke_report.json,dataset_audit.json}.
+- DLRSD resource audit /home/wangchengjun/huangziyi/ovrs_formal_20261011_dlrsd_v1/data_audit.json. Small-artifact SHA256 in artifact_sha256.json.
