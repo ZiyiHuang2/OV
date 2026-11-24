@@ -15,6 +15,8 @@ CAD。两者均保留原上采样方式，真实遥感性能仍需在你的数�
 模块内部计算、交叉包含关系、官方源码阅读与适配边界见
 [加强版设计](docs/INTERACTION.md)。这是待真实数据验证的候选方案。
 
+独立实验见 [CLIP + DINOv3 双分支及 iSAID 对照](research/clip_dinov3/README.md)。
+
 ## 快速开始
 
 在仓库根目录执行以下命令。建议使用独立的 Linux / Python 3.10 环境。
