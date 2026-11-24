@@ -46,10 +46,10 @@ class CSeriesSegmenter(DualPatchSegmenter):
         guides = ((capture[7], ds[2]), (capture[3], ds[0]))
         return c, d, tuple(capture[i] for i in indices), ds, guides, grid
 
-    def forward(self, images, text, labels=None, ignore=255, force_keep_all=False):
+    def forward(self, images, text, labels=None, ignore=255, force_keep_all=False, status=None, pseudo_enabled=True):
         c, d, cs, ds, guides, grid = self.extract(images)
         return self.core(c, d, text, self.clip.logit_scale.exp().float(), grid, images.shape[-2:],
-                         cs, ds, guides, labels=labels, ignore=ignore, force_keep_all=force_keep_all)
+                         cs, ds, guides, labels=labels, ignore=ignore, force_keep_all=force_keep_all, status=status, pseudo_enabled=pseudo_enabled)
 
     @torch.no_grad()
     def audit_features(self, images):

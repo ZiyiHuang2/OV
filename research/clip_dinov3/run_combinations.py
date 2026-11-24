@@ -24,12 +24,16 @@ class StatusSplit(ManifestSplit):
         row = self.rows[index]
         status_path = row.get('pixel_status_file_name')
         if status_path:
-            with Image.open(self.root / status_path) as im:
+            status_file = self.root / status_path
+            with Image.open(status_file) as im:
                 status = torch.from_numpy(np.array(im, dtype=np.int64))
         else:
             status = (target != self.ignore_id).long()
-        if status.shape != target.shape or not ((status >= 0) & (status <= 2)).all() or not torch.equal(status == 1, target != self.ignore_id):
+        if status.shape != target.shape or not ((status == 0) | (status == 1) | (status == 2)).all() or not torch.equal(status == 1, target != self.ignore_id):
             raise ValueError(f'Invalid annotation status for {name}')
+        if (status==2).any():
+            if not row.get('pixel_status_source') or row.get('pixel_status_sha256') != sha256(status_file.read_bytes()).hexdigest():
+                raise ValueError(f'Verified negative pixels require recorded provenance and file hash: {name}')
         return image, target, status, name
 
 
@@ -39,7 +43,7 @@ def data_order(data, seed, epoch):
 
 def loader(data, args, order=None):
     return DataLoader(data, batch_size=args.batch_size, sampler=order, num_workers=args.workers,
-                      pin_memory=torch.device(args.device).type == 'cuda')
+                      pin_memory=torch.device(args.device).type == 'cuda', generator=torch.Generator().manual_seed(args.seed))
 
 
 def save(path, model, opt, meta, epoch, cursor, steps, seen):
@@ -58,7 +62,7 @@ def train(args, model, data, meta, state):
     opt = torch.optim.AdamW(model.core.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     start_epoch = start_cursor = steps = seen = 0
     if state:
-        for key in ('weights', 'size', 'prompt', 'manifest', 'train_classes', 'config', 'seed', 'batch_size', 'lr', 'weight_decay', 'ignore_id', 'limit', 'alignment_weight', 'aux_weight'):
+        for key in ('weights', 'size', 'prompt', 'manifest', 'train_classes', 'config', 'seed', 'batch_size', 'lr', 'weight_decay', 'ignore_id', 'limit', 'alignment_weight', 'aux_weight', 'pseudo_weight', 'pseudo_warmup', 'schema'):
             if state['metadata'][key] != meta[key]:
                 raise ValueError(f'Resume mismatch: {key}')
         model.core.load_state_dict(state['core'], strict=True)
@@ -69,7 +73,7 @@ def train(args, model, data, meta, state):
             torch.cuda.set_rng_state_all(state['rng_cuda'])
     if args.max_steps and steps >= args.max_steps:
         raise ValueError('Checkpoint already at requested max_steps')
-    t = perf_counter(); audit = {}; total = 0.; updates = 0
+    t = perf_counter(); audit = {}; total = 0.; updates = 0; pseudo_count=unknown_count=neg_pixels=0; train_kept=0; component_count=0
     frozen = [(p, p._version) for name, p in model.named_parameters() if not name.startswith('core.')]
     for epoch in range(start_epoch, args.epochs):
         order = data_order(data, args.seed, epoch)
@@ -82,10 +86,15 @@ def train(args, model, data, meta, state):
             if args.audit and not audit:
                 audit.update(model.audit_features(images[:1]))
             opt.zero_grad(set_to_none=True)
-            r = model(images, text, labels=labels, ignore=data.ignore_id)
+            r = model(images, text, labels=labels, ignore=data.ignore_id, status=status, pseudo_enabled=steps>=args.pseudo_warmup)
+            train_kept+=len(r['kept']); neg_pixels+=int((status==2).sum())
+            component_count+=len(r.get('region_ids', []))
             loss = segmentation_loss(r['logits'], labels, data.ignore_id, model.config.use_pixel, status)
             if 'alignment_loss' in r:
                 loss = loss + args.alignment_weight * r['alignment_loss']
+            if 'pseudo_loss' in r:
+                loss = loss + args.pseudo_weight * r['pseudo_loss']
+                pseudo_count+=int(r['pseudo_count']); unknown_count+=int(r['unknown_count'])
             if 'aux_logits' in r:
                 loss = loss + args.aux_weight * segmentation_loss(r['aux_logits'], labels, data.ignore_id)
             if not torch.isfinite(loss):
@@ -115,7 +124,7 @@ def train(args, model, data, meta, state):
         raise RuntimeError('No optimizer steps executed')
     assert all(p.grad is None and p._version == version for p, version in frozen), 'Frozen encoder mutated'
     return {**meta, 'steps': steps, 'seen_images': seen, 'mean_loss': total / updates,
-            'wall_seconds': perf_counter() - t, 'audit': audit}
+            'wall_seconds': perf_counter() - t, 'audit': audit, 'pseudo_selected_patches':pseudo_count, 'wholly_unknown_patches':unknown_count, 'verified_negative_pixels':neg_pixels, 'mean_train_kept':train_kept/updates, 'region_count':component_count}
 
 
 def mean_for(iou, indices):
@@ -186,38 +195,51 @@ def main():
     p.add_argument('--save-every',type=int,default=100); p.add_argument('--warmup',type=int,default=30)
     p.add_argument('--audit',action='store_true'); p.add_argument('--force-keep-all',action='store_true')
     p.add_argument('--affinity',choices=('visual','semantic','dual'),default='dual')
-    p.add_argument('--fusion',choices=('learned','mean'),default='learned')
+    p.add_argument('--fusion',choices=('context','separate','learned','mean'),default='context')
+    p.add_argument('--region-mode',choices=('component','class'),default='component')
+    p.add_argument('--relation-source',choices=('native','fused','joint'),default='joint')
+    p.add_argument('--relation-control',choices=('global','conditional'),default='conditional')
+    p.add_argument('--relation-chunk',type=int,default=128)
+    p.add_argument('--router',choices=('union','dual'),default=None)
+    p.add_argument('--route-train',action=argparse.BooleanOptionalAction,default=True)
+    p.add_argument('--pseudo',action=argparse.BooleanOptionalAction,default=True)
+    p.add_argument('--pseudo-conf',type=float,default=.9)
+    p.add_argument('--pseudo-margin',type=float,default=.2)
+    p.add_argument('--pseudo-weight',type=float,default=.05)
+    p.add_argument('--pseudo-warmup',type=int,default=200)
+    p.add_argument('--decoder',choices=('guided','shared'),default='guided')
     p.add_argument('--neighbors',type=int,default=32); p.add_argument('--topk',type=int)
     p.add_argument('--rs',action=argparse.BooleanOptionalAction,default=None)
     p.add_argument('--pixel',action=argparse.BooleanOptionalAction,default=None)
     p.add_argument('--alignment-weight',type=float,default=.2); p.add_argument('--aux-weight',type=float,default=.2)
     args=p.parse_args()
-    if args.batch_size<1 or args.save_every<1 or args.epochs<1 or args.alignment_weight<0 or args.aux_weight<0: p.error('Invalid training settings')
+    if args.batch_size<1 or args.save_every<1 or args.epochs<1 or args.alignment_weight<0 or args.aux_weight<0 or args.pseudo_weight<0 or args.pseudo_warmup<0: p.error('Invalid training settings')
     if args.mode=='eval' and not args.checkpoint: p.error('Evaluation requires checkpoint')
     if args.mode=='train' and args.force_keep_all: p.error('Training always uses all categories')
     torch.set_num_threads(2); torch.manual_seed(args.seed)
     torch.backends.cuda.matmul.allow_tf32=False; torch.backends.cudnn.allow_tf32=False
     state=torch.load(args.checkpoint,map_location='cpu',weights_only=True) if args.checkpoint else None
+    if state is not None and state['metadata'].get('schema')!=2: p.error('V1 checkpoint: use pinned V1 commit; V2 parameters differ')
     if args.mode=='eval':
         cfg=Config(**state['metadata']['config']); train_classes=state['metadata']['train_classes']
         if args.variant and args.variant!=cfg.variant: p.error('Variant differs from checkpoint')
-        if args.topk is not None:
-            if cfg.variant!='C6': p.error('Top-k override requires C6')
-            cfg=Config(**{**asdict(cfg),'topk':args.topk})
+        if args.topk is not None or args.router is not None:
+            if cfg.variant!='C6': p.error('Routing overrides require C6')
+            cfg=Config(**{**asdict(cfg),'topk':args.topk if args.topk is not None else cfg.topk,'router':args.router or cfg.router})
     else:
         if not args.variant: p.error('Training requires variant')
-        cfg=Config(args.variant,args.affinity,args.neighbors,args.topk if args.topk is not None else 4,args.rs,args.pixel,args.fusion)
+        cfg=Config(variant=args.variant,affinity=args.affinity,neighbors=args.neighbors,topk=args.topk if args.topk is not None else 4,rs=args.rs,pixel=args.pixel,fusion=args.fusion,region_mode=args.region_mode,relation_source=args.relation_source,relation_control=args.relation_control,router=args.router or 'dual',route_train=args.route_train,pseudo=args.pseudo,pseudo_conf=args.pseudo_conf,pseudo_margin=args.pseudo_margin,relation_chunk=args.relation_chunk,decoder=args.decoder)
         train_classes=None
     split='train' if args.mode=='train' else 'val'; data=StatusSplit(args.manifest,split,args.limit)
     if not len(data) or len(set(data.classes))!=len(data.classes): p.error('Empty split or duplicate classes')
     if train_classes is None: train_classes=data.classes
     model=CSeriesSegmenter(args.clip_weights.expanduser(),args.dino_weights.expanduser() if args.dino_weights else None,args.size,cfg,train_classes).to(args.device)
-    meta={'config':asdict(cfg),'weights':model.weight_hashes,'size':args.size,'prompt':PROMPT,
+    meta={'schema':2,'config':asdict(cfg),'weights':model.weight_hashes,'size':args.size,'prompt':PROMPT,
           'manifest':sha256(args.manifest.read_bytes()).hexdigest(),'train_classes':train_classes,
           'ignore_id':data.ignore_id,'seed':args.seed,'batch_size':args.batch_size,'lr':args.lr,
-          'weight_decay':args.weight_decay,'alignment_weight':args.alignment_weight,'aux_weight':args.aux_weight,
+          'weight_decay':args.weight_decay,'alignment_weight':args.alignment_weight,'aux_weight':args.aux_weight,'pseudo_weight':args.pseudo_weight,'pseudo_warmup':args.pseudo_warmup,
           'limit':args.limit,'split':split,'trainable_parameters':sum(p.numel() for p in model.parameters() if p.requires_grad),
-          'torch':str(torch.__version__),'device':str(args.device),'dtype':'float32','tf32':False}
+          'torch':str(torch.__version__),'device':str(args.device),'dtype':'float32','tf32':False, 'checkpoint_train_manifest': state['metadata']['manifest'] if state else None}
     args.output.mkdir(parents=True,exist_ok=True)
     if args.mode=='train':
         if (args.output/'state.pt').exists() and not args.checkpoint: p.error('Refusing to overwrite a prior run; use a new directory or resume')
