@@ -25,19 +25,27 @@ import json, sys
 from pathlib import Path
 from prepare_isaid import CLASSES, SPLIT_SIZES
 p=Path(sys.argv[1]); m=json.loads(p.read_text(encoding='utf-8'))
-assert m['ignore_label']==255
+if m['ignore_label'] != 255:
+    raise ValueError('iSAID ignore label must be 255')
 for field in ('train_classes','test_classes'):
-    assert json.loads((p.parent/m[field]).read_text(encoding='utf-8'))==CLASSES, field
+    if json.loads((p.parent/m[field]).read_text(encoding='utf-8')) != CLASSES:
+        raise ValueError(f'Unexpected iSAID vocabulary: {field}')
 ids={}
 for split,n in SPLIT_SIZES.items():
     rows=m[split]; ids[split]={r['sample_id'] for r in rows}
-    assert len(rows)==len(ids[split])==n, split
+    if len(rows) != n or len(ids[split]) != n:
+        raise ValueError(f'{split}: expected {n} unique sample IDs, found {len(rows)} rows and {len(ids[split])} IDs')
     for r in rows:
         for key in ('file_name','sem_seg_file_name'):
-            if not (p.parent/r[key]).is_file(): raise FileNotFoundError(r[key])
+            file = p.parent/r[key]
+            if file.suffix != '.png' or file.stem != r['sample_id']:
+                raise ValueError(f'{split}: {key} does not match PNG sample {r["sample_id"]}: {file}')
+            if not file.is_file():
+                raise FileNotFoundError(file)
         if split=='train' and r.get('pixel_status_file_name'):
             raise ValueError('Use the original iSAID manifest, not an extra supervision manifest')
-assert not ids['train'] & ids['val'], 'Sample ID overlap'
+if ids['train'] & ids['val']:
+    raise ValueError('Train/val sample ID overlap')
 for f in sys.argv[2:]:
     if not Path(f).is_file(): raise FileNotFoundError(f)
 print('Manifest and weight paths checked; runner verifies weight hashes and loaded masks.')
@@ -58,23 +66,30 @@ import json, sys
 from pathlib import Path
 path, variant, kind, expected = sys.argv[1:]
 r = json.loads(Path(path).read_text(encoding='utf-8'))
-assert r['config']['variant'] == variant, path
+if r['config']['variant'] != variant:
+    raise ValueError(f'Unexpected variant: {path}')
 if kind == 'train':
-    assert r['completed_epochs'] == int(expected) and r['steps'] > 0, path
+    if r['completed_epochs'] != int(expected) or r['steps'] <= 0:
+        raise ValueError(f'Training is incomplete for epoch {expected}: {path}')
 else:
-    assert r['checkpoint_epoch'] == int(expected), path
-    assert r['images'] > 0 and r['miou_percent'] is not None, path
+    if (r['checkpoint_epoch'] != int(expected) or r['checkpoint_kind'] != 'evaluation_only'
+            or r['checkpoint_steps'] <= 0 or r['images'] <= 0 or r['miou_percent'] is None):
+        raise ValueError(f'Evaluation is incomplete for epoch {expected}: {path}')
 PY
 }
 run_job() {
-  local dest=$1; shift
-  if [[ -f "$dest/report.json" ]]; then echo "Completed: $dest"; return; fi
+  local dest=$1 variant=$2 expected=$3 kind=$4
+  shift 3
+  if [[ -f "$dest/report.json" ]] && check_report "$dest/report.json" "$variant" "$kind" "$expected" 2>/dev/null; then
+    echo "Completed: $dest"
+    return
+  fi
   if [[ -e "$dest/state.pt" ]]; then
     echo "Interrupted checkpoint at $dest; resume explicitly with run_combinations.py before continuing." >&2; exit 2
   fi
   mkdir -p "$dest"
   "$PYTHON" -u run_combinations.py "$@" --output "$dest" 2>&1 | tee "$dest/console.log"
-  [[ -s "$dest/report.json" ]] || { echo "Missing report: $dest" >&2; exit 2; }
+  check_report "$dest/report.json" "$variant" "$kind" "$expected"
 }
 if [[ "$phase" != preflight ]]; then
   [[ -f "$out/preflight.ok" ]] && [[ "$(cat "$out/preflight.ok")" == "$key" ]] || { echo 'Matching preflight has not completed' >&2; exit 2; }
@@ -85,31 +100,24 @@ for v in "${variants[@]}"; do
   [[ "$v" != C6 ]] || extras+=(--no-route-train)
   if [[ "$phase" == preflight ]]; then
     dest="$out/preflight/$v"
-    run_job "$dest/train" train "${common[@]}" "${weights[@]}" --variant "$v" --batch-size "$batch" --epochs 1 --lr 1e-3 --weight-decay .01 --lr-schedule constant --train-warmup-steps 0 --grad-clip 1 --workers 0 --limit "$((batch*3))" --audit "${extras[@]}"
-    check_report "$dest/train/report.json" "$v" train 1
-    run_job "$dest/eval" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 0 --limit 8 --warmup 2 --checkpoint "$dest/train/final.pt"
-    check_report "$dest/eval/report.json" "$v" eval 1
+    run_job "$dest/train" "$v" 1 train "${common[@]}" "${weights[@]}" --variant "$v" --batch-size "$batch" --epochs 1 --lr 1e-3 --weight-decay .01 --lr-schedule constant --train-warmup-steps 0 --grad-clip 1 --workers 0 --limit "$((batch*3))" --audit "${extras[@]}"
+    run_job "$dest/eval" "$v" 1 eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 0 --limit 8 --warmup 2 --checkpoint "$dest/train/final.pt"
     # Smoke weights have no research value after successful checks; keep reports.
     rm -f -- "$dest/train/state.pt" "$dest/train/final.pt"
   elif [[ "$phase" == main ]]; then
     dest="$out/main/$v"
-    run_job "$dest/train" train "${common[@]}" "${weights[@]}" --variant "$v" --batch-size "$batch" --epochs "$epochs" "${train_policy[@]}" --workers 4 --audit "${extras[@]}"
-    check_report "$dest/train/report.json" "$v" train "$epochs"
+    run_job "$dest/train" "$v" "$epochs" train "${common[@]}" "${weights[@]}" --variant "$v" --batch-size "$batch" --epochs "$epochs" "${train_policy[@]}" --workers 4 --audit "${extras[@]}"
     [[ -s "$dest/train/final.pt" ]] || { echo "Missing final export: $v" >&2; exit 2; }
     # Same deterministic 512-image source validation subset at epochs 1, 3, 5.
     # Delete each intermediate export only after its completed report is checked.
     for e in 001 003; do
-      run_job "$dest/dev_epoch_$e" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 0 --eval-samples 512 --eval-sample-seed 42 --checkpoint "$dest/train/epoch_$e.pt"
-      check_report "$dest/dev_epoch_$e/report.json" "$v" eval "$((10#$e))"
+      run_job "$dest/dev_epoch_$e" "$v" "$((10#$e))" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 0 --eval-samples 512 --eval-sample-seed 42 --checkpoint "$dest/train/epoch_$e.pt"
       rm -f -- "$dest/train/epoch_$e.pt"
     done
-    run_job "$dest/dev_epoch_005" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 0 --eval-samples 512 --eval-sample-seed 42 --checkpoint "$dest/train/final.pt"
-    check_report "$dest/dev_epoch_005/report.json" "$v" eval 5
-    run_job "$dest/eval" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$dest/train/final.pt"
-    check_report "$dest/eval/report.json" "$v" eval 5
+    run_job "$dest/dev_epoch_005" "$v" "$epochs" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 0 --eval-samples 512 --eval-sample-seed 42 --checkpoint "$dest/train/final.pt"
+    run_job "$dest/eval" "$v" "$epochs" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$dest/train/final.pt"
     if [[ "$v" == C6 ]]; then
-      run_job "$dest/keep_all" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$dest/train/final.pt" --force-keep-all
-      check_report "$dest/keep_all/report.json" "$v" eval 5
+      run_job "$dest/keep_all" "$v" "$epochs" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$dest/train/final.pt" --force-keep-all
     fi
     # All planned local evaluations succeeded: retain final model for external
     # eval, drop optimizer/RNG state by default. No deletion of shared weights.
@@ -122,8 +130,8 @@ for v in "${variants[@]}"; do
     [[ "$external" != "$manifest" ]] || { echo 'External manifest must differ from training manifest'; exit 2; }
     tag=$(sha256sum "$external" | cut -c1-16)
     dest="$out/external/$tag/$v"
-    [[ -s "$out/main/$v/train/report.json" ]] || { echo "Missing completed main train: $v"; exit 2; }
-    run_job "$dest/eval" eval --manifest "$external" --clip-weights "$clip" --size 384 --device cuda --seed 42 "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$out/main/$v/train/final.pt"
+    check_report "$out/main/$v/train/report.json" "$v" train "$epochs"
+    run_job "$dest/eval" "$v" "$epochs" eval --manifest "$external" --clip-weights "$clip" --size 384 --device cuda --seed 42 "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$out/main/$v/train/final.pt"
   fi
 done
 if [[ "$phase" == preflight ]]; then

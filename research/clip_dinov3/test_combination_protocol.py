@@ -101,6 +101,15 @@ class TestProtocol(unittest.TestCase):
         self.assertAlmostEqual(values[0],.0005); self.assertAlmostEqual(values[1],.001)
         self.assertAlmostEqual(values[2],.001); self.assertAlmostEqual(values[-1],.0001)
         self.assertTrue(all(x>=y for x,y in zip(values[2:],values[3:])))
+    def test_formal_schedule(self):
+        runner = read_runner()
+        args = SimpleNamespace(batch_size=8, epochs=5, lr_schedule='cosine',
+                               train_warmup_steps=300, min_lr_ratio=.1, grad_clip=1.)
+        policy = runner.training_policy(args, range(18076))
+        self.assertEqual(policy['planned_steps'], 11300)
+        self.assertEqual(policy['warmup_steps'], 300)
+        for step, lr in ((0, 1e-3/300), (299, 1e-3), (300, 1e-3), (11299, 1e-4)):
+            self.assertAlmostEqual(runner.step_lr(1e-3, step, policy), lr)
     def fixture(self,root):
         (root/'classes.json').write_text(json.dumps(['a','b','c']))
         y=np.array([[0,1,2,255],[0,1,2,255]],dtype=np.uint8)
