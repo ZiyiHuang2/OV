@@ -9,7 +9,10 @@ phase=$1
 manifest=$(realpath "$2"); clip=$(realpath "$3"); dino=$(realpath "$4")
 out=$(realpath -m "$5"); batch=${6:-8}
 epochs=5
-train_policy=(--lr 1e-3 --weight-decay .01 --lr-schedule cosine --train-warmup-steps 300 --min-lr-ratio .1 --grad-clip 1)
+# Opt in before main training if exact continuation of completed arms is required.
+keep_final_state=${KEEP_FINAL_STATE:-0}
+[[ "$keep_final_state" == 0 || "$keep_final_state" == 1 ]] || { echo 'KEEP_FINAL_STATE must be 0 or 1' >&2; exit 2; }
+train_policy=(--lr 1e-3 --weight-decay .01 --lr-schedule cosine --train-warmup-steps 300 --min-lr-ratio .1 --grad-clip 1 --save-every 500)
 [[ "$batch" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid batch'; exit 2; }
 [[ "$phase" == preflight || "$phase" == main || "$phase" == external ]] || exit 2
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -49,6 +52,20 @@ else
 fi
 variants=(C0 B0 D0 C1 C2 C3 C4 C5 C6)
 common=(--manifest "$manifest" --clip-weights "$clip" --size 384 --device cuda --seed 42)
+check_report() {
+  "$PYTHON" - "$1" "$2" "$3" "$4" <<'PY'
+import json, sys
+from pathlib import Path
+path, variant, kind, expected = sys.argv[1:]
+r = json.loads(Path(path).read_text(encoding='utf-8'))
+assert r['config']['variant'] == variant, path
+if kind == 'train':
+    assert r['completed_epochs'] == int(expected) and r['steps'] > 0, path
+else:
+    assert r['checkpoint_epoch'] == int(expected), path
+    assert r['images'] > 0 and r['miou_percent'] is not None, path
+PY
+}
 run_job() {
   local dest=$1; shift
   if [[ -f "$dest/report.json" ]]; then echo "Completed: $dest"; return; fi
@@ -69,18 +86,35 @@ for v in "${variants[@]}"; do
   if [[ "$phase" == preflight ]]; then
     dest="$out/preflight/$v"
     run_job "$dest/train" train "${common[@]}" "${weights[@]}" --variant "$v" --batch-size "$batch" --epochs 1 --lr 1e-3 --weight-decay .01 --lr-schedule constant --train-warmup-steps 0 --grad-clip 1 --workers 0 --limit "$((batch*3))" --audit "${extras[@]}"
-    run_job "$dest/eval" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 0 --limit 8 --warmup 2 --checkpoint "$dest/train/state.pt"
+    check_report "$dest/train/report.json" "$v" train 1
+    run_job "$dest/eval" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 0 --limit 8 --warmup 2 --checkpoint "$dest/train/final.pt"
+    check_report "$dest/eval/report.json" "$v" eval 1
+    # Smoke weights have no research value after successful checks; keep reports.
+    rm -f -- "$dest/train/state.pt" "$dest/train/final.pt"
   elif [[ "$phase" == main ]]; then
     dest="$out/main/$v"
     run_job "$dest/train" train "${common[@]}" "${weights[@]}" --variant "$v" --batch-size "$batch" --epochs "$epochs" "${train_policy[@]}" --workers 4 --audit "${extras[@]}"
-    # Same deterministic 512-image source validation subset at epochs 1, 3, 5;
-    # diagnostic only, no model/epoch selection on external data.
-    for e in 001 003 005; do
+    check_report "$dest/train/report.json" "$v" train "$epochs"
+    [[ -s "$dest/train/final.pt" ]] || { echo "Missing final export: $v" >&2; exit 2; }
+    # Same deterministic 512-image source validation subset at epochs 1, 3, 5.
+    # Delete each intermediate export only after its completed report is checked.
+    for e in 001 003; do
       run_job "$dest/dev_epoch_$e" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 0 --eval-samples 512 --eval-sample-seed 42 --checkpoint "$dest/train/epoch_$e.pt"
+      check_report "$dest/dev_epoch_$e/report.json" "$v" eval "$((10#$e))"
+      rm -f -- "$dest/train/epoch_$e.pt"
     done
-    run_job "$dest/eval" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$dest/train/state.pt"
+    run_job "$dest/dev_epoch_005" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 0 --eval-samples 512 --eval-sample-seed 42 --checkpoint "$dest/train/final.pt"
+    check_report "$dest/dev_epoch_005/report.json" "$v" eval 5
+    run_job "$dest/eval" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$dest/train/final.pt"
+    check_report "$dest/eval/report.json" "$v" eval 5
     if [[ "$v" == C6 ]]; then
-      run_job "$dest/keep_all" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$dest/train/state.pt" --force-keep-all
+      run_job "$dest/keep_all" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$dest/train/final.pt" --force-keep-all
+      check_report "$dest/keep_all/report.json" "$v" eval 5
+    fi
+    # All planned local evaluations succeeded: retain final model for external
+    # eval, drop optimizer/RNG state by default. No deletion of shared weights.
+    if [[ "$keep_final_state" == 0 ]]; then
+      rm -f -- "$dest/train/state.pt"
     fi
   else
     : "${EXTERNAL_MANIFEST:?Set EXTERNAL_MANIFEST to an audited external val manifest}"
@@ -89,7 +123,7 @@ for v in "${variants[@]}"; do
     tag=$(sha256sum "$external" | cut -c1-16)
     dest="$out/external/$tag/$v"
     [[ -s "$out/main/$v/train/report.json" ]] || { echo "Missing completed main train: $v"; exit 2; }
-    run_job "$dest/eval" eval --manifest "$external" --clip-weights "$clip" --size 384 --device cuda --seed 42 "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$out/main/$v/train/state.pt"
+    run_job "$dest/eval" eval --manifest "$external" --clip-weights "$clip" --size 384 --device cuda --seed 42 "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$out/main/$v/train/final.pt"
   fi
 done
 if [[ "$phase" == preflight ]]; then

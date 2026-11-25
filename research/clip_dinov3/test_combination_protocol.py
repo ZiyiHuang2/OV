@@ -67,7 +67,34 @@ class TestProtocol(unittest.TestCase):
             self.assertEqual((aa['steps'],aa['cursor'],aa['seen']),(bb['steps'],bb['cursor'],bb['seen']))
             self.assertEqual(aa['progress'],bb['progress'])
             self.assertTrue((a/'epoch_001.pt').exists() and (b/'epoch_001.pt').exists())
+            for root in (a,b):
+                stage=torch.load(root/'epoch_001.pt',weights_only=True)
+                self.assertEqual(stage['checkpoint_kind'],'evaluation_only')
+                self.assertEqual(stage['epoch'],1)
+                self.assertIn('memory.bank',stage['core'])
+                self.assertNotIn('optimizer',stage)
+                self.assertNotIn('rng_cpu',stage)
+                self.assertNotIn('progress',stage)
+                self.assertFalse((root/'final.pt').exists())
             self.assertEqual(aa['optimizer']['param_groups'],bb['optimizer']['param_groups'])
+    def test_lightweight_final_export(self):
+        runner=read_runner(); data=FixtureData()
+        with tempfile.TemporaryDirectory() as td:
+            out=Path(td); model=FixtureModel()
+            from dataclasses import asdict
+            args=SimpleNamespace(output=out,max_steps=None,epochs=1,seed=42,batch_size=2,workers=0,device='cpu',lr=.001,weight_decay=.01,alignment_weight=.2,aux_weight=.2,pseudo_weight=.05,pseudo_warmup=0,audit=False,save_every=500,lr_schedule='cosine',train_warmup_steps=0,min_lr_ratio=.1,grad_clip=1.)
+            meta=dict(weights={},size=48,prompt='test {}',manifest='fixture',train_classes=data.classes,config=asdict(model.config),seed=42,batch_size=2,lr=.001,weight_decay=.01,ignore_id=255,limit=None,alignment_weight=.2,aux_weight=.2,pseudo_weight=.05,pseudo_warmup=0,schema=2,training_policy=runner.training_policy(args,data))
+            runner.train(args,model,data,meta,None)
+            final=torch.load(out/'final.pt',weights_only=True)
+            state=torch.load(out/'state.pt',weights_only=True)
+            self.assertEqual(set(final),{'metadata','core','epoch','steps','seen','checkpoint_kind'})
+            self.assertEqual(final['checkpoint_kind'],'evaluation_only')
+            for k,v in final['core'].items():
+                torch.testing.assert_close(v,state['core'][k],rtol=0,atol=0,msg=k)
+            self.assertLess((out/'final.pt').stat().st_size,(out/'state.pt').stat().st_size)
+            self.assertFalse(list(out.glob('epoch_*.pt')))
+            with self.assertRaisesRegex(ValueError,'Evaluation-only'):
+                runner.train(args,FixtureModel(),data,meta,final)
     def test_schedule(self):
         runner=read_runner(); p={'planned_steps':10,'warmup_steps':2,'schedule':'cosine','min_lr_ratio':.1}
         values=[runner.step_lr(.001,i,p) for i in range(10)]

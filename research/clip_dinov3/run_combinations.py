@@ -72,9 +72,22 @@ def save(path, model, opt, meta, epoch, cursor, steps, seen, progress):
              'epoch': epoch, 'cursor': cursor, 'steps': steps, 'seen': seen, 'progress': progress,
              'rng_cpu': torch.get_rng_state(),
              'rng_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []}
+    atomic_save(path, state)
+
+
+def atomic_save(path, state):
+    # Never remove the previous recoverable file until the replacement is complete.
     tmp = path.with_suffix('.tmp')
     torch.save(state, tmp)
     tmp.replace(path)
+
+
+def save_eval(path, model, meta, epoch, steps, seen):
+    # Include all core buffers (including C5/C6 prototype memory), but no frozen
+    # backbones, optimizer moments, RNG or training progress.
+    atomic_save(path, {'metadata': meta, 'core': model.core.state_dict(),
+                       'epoch': epoch, 'steps': steps, 'seen': seen,
+                       'checkpoint_kind': 'evaluation_only'})
 
 
 def blank_stats():
@@ -103,6 +116,8 @@ def train(args, model, data, meta, state):
     start_epoch = start_cursor = steps = seen = 0
     progress = {'total': blank_stats(), 'current': blank_stats(), 'epochs': [], 'audit': {}}
     if state:
+        if state.get('checkpoint_kind') == 'evaluation_only':
+            raise ValueError('Evaluation-only checkpoint: exact training resume requires state.pt')
         for key in ('weights', 'size', 'prompt', 'manifest', 'train_classes', 'config', 'seed', 'batch_size', 'lr', 'weight_decay', 'ignore_id', 'limit', 'alignment_weight', 'aux_weight', 'pseudo_weight', 'pseudo_warmup', 'schema', 'training_policy'):
             if state['metadata'].get(key) != meta.get(key):
                 raise ValueError(f'Resume mismatch: {key}')
@@ -179,8 +194,14 @@ def train(args, model, data, meta, state):
                        'last_lr': opt.param_groups[0]['lr'], **stats_summary(progress['current'])}
             progress['epochs'].append(summary)
             progress['current'] = blank_stats()
-            # Keep immutable-by-convention epoch snapshots as well as the resumable state.
-            save(args.output / f'epoch_{epoch+1:03d}.pt', model, opt, meta, epoch+1, 0, steps, seen, progress)
+            # Stage 1/3 are needed for the fixed dev curve only. Final is a
+            # separate lightweight export; never duplicate it as epoch_005.
+            if epoch+1 == args.epochs:
+                save_eval(args.output / 'final.pt', model, meta, epoch+1, steps, seen)
+            elif epoch+1 in (1, 3):
+                save_eval(args.output / f'epoch_{epoch+1:03d}.pt', model, meta, epoch+1, steps, seen)
+            # Write snapshots first: a crash cannot advance the recovery cursor
+            # past an epoch whose required evaluation export does not exist.
             save(args.output / 'state.pt', model, opt, meta, epoch+1, 0, steps, seen, progress)
             print('epoch_summary=' + json.dumps(summary, allow_nan=False), flush=True)
         if args.max_steps and steps >= args.max_steps:
@@ -271,7 +292,7 @@ def main():
     p.add_argument('--min-lr-ratio',type=float,default=.1); p.add_argument('--grad-clip',type=float,default=1.)
     p.add_argument('--eval-samples',type=int); p.add_argument('--eval-sample-seed',type=int,default=42)
     p.add_argument('--weight-decay',type=float,default=.01); p.add_argument('--max-steps',type=int)
-    p.add_argument('--save-every',type=int,default=100); p.add_argument('--warmup',type=int,default=30)
+    p.add_argument('--save-every',type=int,default=500); p.add_argument('--warmup',type=int,default=30)
     p.add_argument('--audit',action='store_true'); p.add_argument('--force-keep-all',action='store_true')
     p.add_argument('--affinity',choices=('visual','semantic','dual'),default='dual')
     p.add_argument('--fusion',choices=('context','separate','learned','mean'),default='context')
@@ -301,6 +322,8 @@ def main():
     torch.backends.cuda.matmul.allow_tf32=False; torch.backends.cudnn.allow_tf32=False
     state=torch.load(args.checkpoint,map_location='cpu',weights_only=True) if args.checkpoint else None
     if state is not None and state['metadata'].get('schema')!=2: p.error('V1 checkpoint: use pinned V1 commit; V2 parameters differ')
+    if args.mode=='train' and state is not None and state.get('checkpoint_kind')=='evaluation_only':
+        p.error('Evaluation-only checkpoint cannot resume optimizer/RNG; use state.pt')
     if args.mode=='eval':
         cfg=Config(**state['metadata']['config']); train_classes=state['metadata']['train_classes']
         if args.variant and args.variant!=cfg.variant: p.error('Variant differs from checkpoint')
@@ -330,7 +353,13 @@ def main():
         for key in ('weights','size','prompt'):
             if state['metadata'][key]!=meta[key]: raise ValueError(f'Eval mismatch: {key}')
         model.core.load_state_dict(state['core'],strict=True); report=evaluate(args,model,data,meta)
-    (args.output/'report.json').write_text(json.dumps(report,indent=2,allow_nan=False)+'\n',encoding='utf-8')
+        report['checkpoint_epoch'] = state.get('epoch')
+        report['checkpoint_steps'] = state.get('steps')
+        report['checkpoint_kind'] = state.get('checkpoint_kind', 'training_state')
+    # A partial JSON file must never be mistaken for a completed job/cleanup signal.
+    report_tmp = args.output/'report.tmp'
+    report_tmp.write_text(json.dumps(report,indent=2,allow_nan=False)+'\n',encoding='utf-8')
+    report_tmp.replace(args.output/'report.json')
     print(json.dumps(report,indent=2,allow_nan=False),flush=True)
 
 if __name__=='__main__': main()
