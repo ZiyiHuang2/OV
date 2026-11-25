@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Matched full-epoch C-series experiment. No automatic batch-size change.
+# Matched five-epoch C-series exploration. No automatic batch-size change.
 set -euo pipefail
 if [[ $# -lt 5 || $# -gt 6 ]]; then
   echo 'Usage: bash run_isaid_suite.sh preflight|main|external MANIFEST CLIP DINO OUT [BATCH=8]' >&2
@@ -8,6 +8,8 @@ fi
 phase=$1
 manifest=$(realpath "$2"); clip=$(realpath "$3"); dino=$(realpath "$4")
 out=$(realpath -m "$5"); batch=${6:-8}
+epochs=5
+train_policy=(--lr 1e-3 --weight-decay .01 --lr-schedule cosine --train-warmup-steps 300 --min-lr-ratio .1 --grad-clip 1)
 [[ "$batch" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid batch'; exit 2; }
 [[ "$phase" == preflight || "$phase" == main || "$phase" == external ]] || exit 2
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -38,7 +40,7 @@ for f in sys.argv[2:]:
 print('Manifest and weight paths checked; runner verifies weight hashes and loaded masks.')
 PY
 # All nine configurations use one fixed protocol; bind the preflight to code/data/paths.
-key=$(printf '%s\n' "$(git rev-parse HEAD)" "$(sha256sum "$manifest")" "$clip" "$dino" "$batch")
+key=$(printf '%s\n' "$(git rev-parse HEAD)" "$(sha256sum "$manifest")" "$clip" "$dino" "$batch" "$epochs" "${train_policy[*]}")
 if [[ -e "$out/protocol.txt" ]]; then
   [[ "$(cat "$out/protocol.txt")" == "$key" ]] || { echo 'Protocol changed; choose a new OUT directory' >&2; exit 2; }
 else
@@ -63,13 +65,19 @@ fi
 for v in "${variants[@]}"; do
   weights=(); [[ "$v" == C0 ]] || weights=(--dino-weights "$dino")
   extras=(); [[ "$v" != C5 && "$v" != C6 ]] || extras=(--no-pseudo)
+  [[ "$v" != C6 ]] || extras+=(--no-route-train)
   if [[ "$phase" == preflight ]]; then
     dest="$out/preflight/$v"
-    run_job "$dest/train" train "${common[@]}" "${weights[@]}" --variant "$v" --batch-size "$batch" --epochs 1 --lr 1e-3 --weight-decay .01 --workers 0 --limit "$((batch*3))" --audit "${extras[@]}"
+    run_job "$dest/train" train "${common[@]}" "${weights[@]}" --variant "$v" --batch-size "$batch" --epochs 1 --lr 1e-3 --weight-decay .01 --lr-schedule constant --train-warmup-steps 0 --grad-clip 1 --workers 0 --limit "$((batch*3))" --audit "${extras[@]}"
     run_job "$dest/eval" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 0 --limit 8 --warmup 2 --checkpoint "$dest/train/state.pt"
   elif [[ "$phase" == main ]]; then
     dest="$out/main/$v"
-    run_job "$dest/train" train "${common[@]}" "${weights[@]}" --variant "$v" --batch-size "$batch" --epochs 1 --lr 1e-3 --weight-decay .01 --workers 4 --audit "${extras[@]}"
+    run_job "$dest/train" train "${common[@]}" "${weights[@]}" --variant "$v" --batch-size "$batch" --epochs "$epochs" "${train_policy[@]}" --workers 4 --audit "${extras[@]}"
+    # Same deterministic 512-image source validation subset at epochs 1, 3, 5;
+    # diagnostic only, no model/epoch selection on external data.
+    for e in 001 003 005; do
+      run_job "$dest/dev_epoch_$e" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 0 --eval-samples 512 --eval-sample-seed 42 --checkpoint "$dest/train/epoch_$e.pt"
+    done
     run_job "$dest/eval" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$dest/train/state.pt"
     if [[ "$v" == C6 ]]; then
       run_job "$dest/keep_all" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$dest/train/state.pt" --force-keep-all
@@ -93,7 +101,7 @@ import csv, json, sys
 from pathlib import Path
 root=Path(sys.argv[1]); rows=[]
 for v in ('C0','B0','D0','C1','C2','C3','C4','C5','C6'):
-    for sub in ('eval','keep_all'):
+    for sub in ('eval','keep_all','dev_epoch_001','dev_epoch_003','dev_epoch_005'):
         p=root/v/sub/'report.json'
         if p.is_file():
             r=json.loads(p.read_text(encoding='utf-8'))

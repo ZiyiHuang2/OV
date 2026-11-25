@@ -52,18 +52,28 @@ class TestProtocol(unittest.TestCase):
         runner=read_runner();data=FixtureData()
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);a=root/'full';b=root/'resume';a.mkdir();b.mkdir()
-            def args(out,steps):return SimpleNamespace(output=out,max_steps=steps,epochs=1,seed=42,batch_size=1,workers=0,device='cpu',lr=.001,weight_decay=.01,alignment_weight=.2,aux_weight=.2,pseudo_weight=.05,pseudo_warmup=0,audit=False,save_every=1)
+            def args(out,steps):return SimpleNamespace(output=out,max_steps=steps,epochs=2,seed=42,batch_size=1,workers=0,device='cpu',lr=.001,weight_decay=.01,alignment_weight=.2,aux_weight=.2,pseudo_weight=.05,pseudo_warmup=0,audit=False,save_every=1,lr_schedule='cosine',train_warmup_steps=1,min_lr_ratio=.1,grad_clip=1.)
             from dataclasses import asdict
             meta=dict(weights={},size=48,prompt='test {}',manifest='fixture',train_classes=data.classes,config=asdict(Config('C6',topk=1)),seed=42,batch_size=1,lr=.001,weight_decay=.01,ignore_id=255,limit=None,alignment_weight=.2,aux_weight=.2,pseudo_weight=.05,pseudo_warmup=0,schema=2)
-            torch.manual_seed(123);full=FixtureModel();runner.train(args(a,4),full,data,meta,None)
-            torch.manual_seed(123);part=FixtureModel();runner.train(args(b,2),part,data,meta,None)
-            state=torch.load(b/'state.pt',weights_only=True);resumed=FixtureModel();runner.train(args(b,4),resumed,data,meta,state)
+            meta['training_policy']=runner.training_policy(args(a,8),data)
+            torch.manual_seed(123);full=FixtureModel();runner.train(args(a,8),full,data,meta,None)
+            torch.manual_seed(123);part=FixtureModel();runner.train(args(b,5),part,data,meta,None)
+            state=torch.load(b/'state.pt',weights_only=True);resumed=FixtureModel();runner.train(args(b,8),resumed,data,meta,state)
             aa=torch.load(a/'state.pt',weights_only=True);bb=torch.load(b/'state.pt',weights_only=True)
             for k,v in aa['core'].items(): torch.testing.assert_close(v,bb['core'][k],rtol=0,atol=0,msg=k)
             for k,v in aa['optimizer']['state'].items():
                 for field,value in v.items():torch.testing.assert_close(value,bb['optimizer']['state'][k][field],rtol=0,atol=0)
             torch.testing.assert_close(aa['rng_cpu'],bb['rng_cpu'],rtol=0,atol=0)
             self.assertEqual((aa['steps'],aa['cursor'],aa['seen']),(bb['steps'],bb['cursor'],bb['seen']))
+            self.assertEqual(aa['progress'],bb['progress'])
+            self.assertTrue((a/'epoch_001.pt').exists() and (b/'epoch_001.pt').exists())
+            self.assertEqual(aa['optimizer']['param_groups'],bb['optimizer']['param_groups'])
+    def test_schedule(self):
+        runner=read_runner(); p={'planned_steps':10,'warmup_steps':2,'schedule':'cosine','min_lr_ratio':.1}
+        values=[runner.step_lr(.001,i,p) for i in range(10)]
+        self.assertAlmostEqual(values[0],.0005); self.assertAlmostEqual(values[1],.001)
+        self.assertAlmostEqual(values[2],.001); self.assertAlmostEqual(values[-1],.0001)
+        self.assertTrue(all(x>=y for x,y in zip(values[2:],values[3:])))
     def fixture(self,root):
         (root/'classes.json').write_text(json.dumps(['a','b','c']))
         y=np.array([[0,1,2,255],[0,1,2,255]],dtype=np.uint8)

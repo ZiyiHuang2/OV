@@ -3,6 +3,7 @@ import argparse
 from dataclasses import asdict
 from hashlib import sha256
 import json
+import math
 from pathlib import Path
 from time import perf_counter
 
@@ -46,9 +47,29 @@ def loader(data, args, order=None):
                       pin_memory=torch.device(args.device).type == 'cuda', generator=torch.Generator().manual_seed(args.seed))
 
 
-def save(path, model, opt, meta, epoch, cursor, steps, seen):
+def training_policy(args, data):
+    total = math.ceil(len(data) / args.batch_size) * args.epochs
+    return {'epochs': args.epochs, 'planned_steps': total,
+            'schedule': args.lr_schedule,
+            'warmup_steps': min(args.train_warmup_steps, total // 10),
+            'min_lr_ratio': args.min_lr_ratio, 'grad_clip': args.grad_clip}
+
+
+def step_lr(base_lr, step, policy):
+    """Optimizer-update indexed schedule; max_steps only interrupts, never changes horizon."""
+    total, warm = policy['planned_steps'], policy['warmup_steps']
+    if step < warm:
+        return base_lr * (step + 1) / warm
+    if policy['schedule'] == 'constant':
+        return base_lr
+    p = min(1., max(0., (step - warm) / max(1, total - warm - 1)))
+    floor = policy['min_lr_ratio']
+    return base_lr * (floor + (1 - floor) * .5 * (1 + math.cos(math.pi * p)))
+
+
+def save(path, model, opt, meta, epoch, cursor, steps, seen, progress):
     state = {'metadata': meta, 'core': model.core.state_dict(), 'optimizer': opt.state_dict(),
-             'epoch': epoch, 'cursor': cursor, 'steps': steps, 'seen': seen,
+             'epoch': epoch, 'cursor': cursor, 'steps': steps, 'seen': seen, 'progress': progress,
              'rng_cpu': torch.get_rng_state(),
              'rng_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []}
     tmp = path.with_suffix('.tmp')
@@ -56,24 +77,51 @@ def save(path, model, opt, meta, epoch, cursor, steps, seen):
     tmp.replace(path)
 
 
+def blank_stats():
+    return dict(updates=0, skipped_batches=0, loss=0., segmentation=0.,
+                alignment=0., pseudo=0., auxiliary=0., grad_norm=0., clipped=0,
+                pseudo_count=0, unknown_count=0, neg_pixels=0, kept=0, regions=0)
+
+
+def stats_summary(s):
+    n = max(1, s['updates'])
+    return {**s, 'mean_loss': s['loss']/n, 'mean_segmentation_loss': s['segmentation']/n,
+            'mean_weighted_alignment_loss': s['alignment']/n,
+            'mean_weighted_pseudo_loss': s['pseudo']/n,
+            'mean_weighted_auxiliary_loss': s['auxiliary']/n,
+            'mean_preclip_grad_norm': s['grad_norm']/n,
+            'clipped_fraction': s['clipped']/n, 'mean_train_kept': s['kept']/n}
+
+
 def train(args, model, data, meta, state):
     model.train()
     text = model.text_features(data.classes)
     opt = torch.optim.AdamW(model.core.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    policy = training_policy(args, data)
+    if meta.get('training_policy') != policy:
+        raise ValueError('Training policy metadata mismatch')
     start_epoch = start_cursor = steps = seen = 0
+    progress = {'total': blank_stats(), 'current': blank_stats(), 'epochs': [], 'audit': {}}
     if state:
-        for key in ('weights', 'size', 'prompt', 'manifest', 'train_classes', 'config', 'seed', 'batch_size', 'lr', 'weight_decay', 'ignore_id', 'limit', 'alignment_weight', 'aux_weight', 'pseudo_weight', 'pseudo_warmup', 'schema'):
-            if state['metadata'][key] != meta[key]:
+        for key in ('weights', 'size', 'prompt', 'manifest', 'train_classes', 'config', 'seed', 'batch_size', 'lr', 'weight_decay', 'ignore_id', 'limit', 'alignment_weight', 'aux_weight', 'pseudo_weight', 'pseudo_warmup', 'schema', 'training_policy'):
+            if state['metadata'].get(key) != meta.get(key):
                 raise ValueError(f'Resume mismatch: {key}')
+        if 'progress' not in state:
+            raise ValueError('Old training checkpoint: evaluate it or resume with its pinned original commit')
         model.core.load_state_dict(state['core'], strict=True)
         opt.load_state_dict(state['optimizer'])
         start_epoch, start_cursor, steps, seen = (state[k] for k in ('epoch', 'cursor', 'steps', 'seen'))
+        progress = state['progress']
         torch.set_rng_state(state['rng_cpu'])
         if torch.cuda.is_available() and state['rng_cuda']:
             torch.cuda.set_rng_state_all(state['rng_cuda'])
-    if args.max_steps and steps >= args.max_steps:
+    if args.max_steps and steps >= args.max_steps and start_epoch < args.epochs:
         raise ValueError('Checkpoint already at requested max_steps')
-    t = perf_counter(); audit = {}; total = 0.; updates = 0; pseudo_count=unknown_count=neg_pixels=0; train_kept=0; component_count=0
+    t = perf_counter()
+    cuda = torch.device(args.device).type == 'cuda'
+    if cuda:
+        torch.cuda.reset_peak_memory_stats()
+    audit = progress['audit']
     frozen = [(p, p._version) for name, p in model.named_parameters() if not name.startswith('core.')]
     for epoch in range(start_epoch, args.epochs):
         order = data_order(data, args.seed, epoch)
@@ -81,50 +129,73 @@ def train(args, model, data, meta, state):
         for images, labels, status, ids in loader(data, args, order[cursor:]):
             cursor += len(images)
             if not (labels != data.ignore_id).any() and not (model.config.use_pixel and (status == 2).any()):
+                for s in (progress['total'], progress['current']):
+                    s['skipped_batches'] += 1
                 continue
             images, labels, status = (x.to(args.device, non_blocking=True) for x in (images, labels, status))
             if args.audit and not audit:
                 audit.update(model.audit_features(images[:1]))
+            lr = step_lr(args.lr, steps, policy)
+            for group in opt.param_groups:
+                group['lr'] = lr
             opt.zero_grad(set_to_none=True)
             r = model(images, text, labels=labels, ignore=data.ignore_id, status=status, pseudo_enabled=steps>=args.pseudo_warmup)
-            train_kept+=len(r['kept']); neg_pixels+=int((status==2).sum())
-            component_count+=len(r.get('region_ids', []))
-            loss = segmentation_loss(r['logits'], labels, data.ignore_id, model.config.use_pixel, status)
-            if 'alignment_loss' in r:
-                loss = loss + args.alignment_weight * r['alignment_loss']
-            if 'pseudo_loss' in r:
-                loss = loss + args.pseudo_weight * r['pseudo_loss']
-                pseudo_count+=int(r['pseudo_count']); unknown_count+=int(r['unknown_count'])
-            if 'aux_logits' in r:
-                loss = loss + args.aux_weight * segmentation_loss(r['aux_logits'], labels, data.ignore_id)
+            seg = segmentation_loss(r['logits'], labels, data.ignore_id, model.config.use_pixel, status)
+            zero = seg.new_zeros(())
+            align = args.alignment_weight * r.get('alignment_loss', zero)
+            pseudo = args.pseudo_weight * r.get('pseudo_loss', zero)
+            aux = args.aux_weight * segmentation_loss(r['aux_logits'], labels, data.ignore_id) if 'aux_logits' in r else zero
+            loss = seg + align + pseudo + aux
             if not torch.isfinite(loss):
                 raise RuntimeError(f'Nonfinite loss on {ids}')
             loss.backward()
-            if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in model.core.parameters()):
-                raise RuntimeError(f'Nonfinite gradient on {ids}')
-            if args.audit and updates < 3:
-                audit[f'grad_step_{updates + 1}'] = {n: (float(p.grad.norm()) if p.grad is not None else None) for n, p in model.core.named_parameters()}
+            if args.audit and steps < 3:
+                audit[f'grad_step_{steps + 1}'] = {n: (float(p.grad.norm()) if p.grad is not None else None) for n, p in model.core.named_parameters()}
+            # Also checks nonfinite gradients when clipping is disabled.
+            grad_norm = float(torch.nn.utils.clip_grad_norm_(model.core.parameters(),
+                             args.grad_clip if args.grad_clip > 0 else float('inf'), error_if_nonfinite=True))
             opt.step()
             if model.config.use_rs:
                 model.core.memory.update(r['regions'], r['region_ids'])
-            steps += 1; seen += len(images); updates += 1; total += loss.item()
-            if args.audit and updates == 1:
+            steps += 1; seen += len(images)
+            values = torch.stack((loss.detach(), seg.detach(), align.detach(), pseudo.detach(), aux.detach())).cpu().tolist()
+            update = dict(zip(('loss', 'segmentation', 'alignment', 'pseudo', 'auxiliary'), values))
+            update.update(updates=1, grad_norm=grad_norm, clipped=int(args.grad_clip > 0 and grad_norm > args.grad_clip),
+                          pseudo_count=int(r.get('pseudo_count',0)), unknown_count=int(r.get('unknown_count',0)),
+                          neg_pixels=int((status==2).sum()), kept=len(r['kept']), regions=len(r.get('region_ids', [])))
+            for s in (progress['total'], progress['current']):
+                for key, value in update.items():
+                    s[key] += value
+            if args.audit and steps == 1:
                 audit['first_train_ids'] = list(ids)
-            if steps % args.save_every == 0 or (args.max_steps and steps >= args.max_steps):
-                save(args.output / 'state.pt', model, opt, meta, epoch, cursor, steps, seen)
             if steps == 1 or steps % 100 == 0:
-                print(f'step={steps} epoch={epoch} loss={loss.item():.6f}', flush=True)
+                print(f'step={steps} epoch={epoch+1} lr={lr:.8g} loss={values[0]:.6f} seg={values[1]:.6f} align={values[2]:.6f} pseudo={values[3]:.6f} aux={values[4]:.6f} preclip_norm={grad_norm:.6f}', flush=True)
+            if steps % args.save_every == 0 or (args.max_steps and steps >= args.max_steps):
+                save(args.output / 'state.pt', model, opt, meta, epoch, cursor, steps, seen, progress)
             if args.max_steps and steps >= args.max_steps:
                 break
         if cursor == len(order):
-            save(args.output / 'state.pt', model, opt, meta, epoch + 1, 0, steps, seen)
+            summary = {'epoch': epoch+1, 'steps': steps, 'seen_images': seen,
+                       'last_lr': opt.param_groups[0]['lr'], **stats_summary(progress['current'])}
+            progress['epochs'].append(summary)
+            progress['current'] = blank_stats()
+            # Keep immutable-by-convention epoch snapshots as well as the resumable state.
+            save(args.output / f'epoch_{epoch+1:03d}.pt', model, opt, meta, epoch+1, 0, steps, seen, progress)
+            save(args.output / 'state.pt', model, opt, meta, epoch+1, 0, steps, seen, progress)
+            print('epoch_summary=' + json.dumps(summary, allow_nan=False), flush=True)
         if args.max_steps and steps >= args.max_steps:
             break
-    if updates == 0:
+    if not steps:
         raise RuntimeError('No optimizer steps executed')
     assert all(p.grad is None and p._version == version for p, version in frozen), 'Frozen encoder mutated'
-    return {**meta, 'steps': steps, 'seen_images': seen, 'mean_loss': total / updates,
-            'wall_seconds': perf_counter() - t, 'audit': audit, 'pseudo_selected_patches':pseudo_count, 'wholly_unknown_patches':unknown_count, 'verified_negative_pixels':neg_pixels, 'mean_train_kept':train_kept/updates, 'region_count':component_count}
+    s = stats_summary(progress['total'])
+    return {**meta, 'steps': steps, 'seen_images': seen, 'completed_epochs': len(progress['epochs']),
+            'epoch_history': progress['epochs'], 'train_statistics': s, 'mean_loss': s['mean_loss'],
+            'wall_seconds_this_invocation': perf_counter() - t, 'audit': audit,
+            'train_peak_cuda_mib_this_invocation': torch.cuda.max_memory_allocated()/2**20 if cuda else None,
+            'train_peak_reserved_cuda_mib_this_invocation': torch.cuda.max_memory_reserved()/2**20 if cuda else None,
+            'pseudo_selected_patches': s['pseudo_count'], 'wholly_unknown_patches': s['unknown_count'],
+            'verified_negative_pixels': s['neg_pixels'], 'mean_train_kept': s['mean_train_kept'], 'region_count': s['regions']}
 
 
 def mean_for(iou, indices):
@@ -145,7 +216,10 @@ def evaluate(args, model, data, meta):
         torch.cuda.reset_peak_memory_stats()
     times, sizes = [], []; present_classes = retained_classes = retained_pixels = total_pixels = 0
     seen = set(model.train_classes); sample_digest = sha256(); peak = 0
-    for images, labels, _, names in loader(data, args):
+    sample_order = None
+    if args.eval_samples is not None:
+        sample_order = sorted(data_order(data, args.eval_sample_seed, 0)[:args.eval_samples])
+    for images, labels, _, names in loader(data, args, sample_order):
         images = images.to(args.device, non_blocking=True)
         if cuda:
             torch.cuda.reset_peak_memory_stats(); start = torch.cuda.Event(enable_timing=True); end = torch.cuda.Event(enable_timing=True); start.record()
@@ -178,7 +252,8 @@ def evaluate(args, model, data, meta):
             'pixel_recall': retained_pixels/total_pixels if total_pixels else None,
             'batch_ms_mean': sum(times)/len(times), 'batch_ms_p95': float(np.percentile(times,95)),
             'ms_per_image': sum(times)/len(sizes), 'peak_cuda_mib': peak/2**20 if cuda else None,
-            'force_keep_all': args.force_keep_all}
+            'force_keep_all': args.force_keep_all, 'eval_samples': args.eval_samples,
+            'eval_sample_seed': args.eval_sample_seed if args.eval_samples is not None else None}
 
 
 def main():
@@ -190,7 +265,11 @@ def main():
     p.add_argument('--device', default='cuda'); p.add_argument('--size',type=int,default=384)
     p.add_argument('--batch-size',type=int,default=1); p.add_argument('--workers',type=int,default=0)
     p.add_argument('--limit',type=int); p.add_argument('--seed',type=int,default=42)
-    p.add_argument('--epochs',type=int,default=1); p.add_argument('--lr',type=float,default=1e-3)
+    p.add_argument('--epochs',type=int,default=5); p.add_argument('--lr',type=float,default=1e-3)
+    p.add_argument('--lr-schedule',choices=('constant','cosine'),default='cosine')
+    p.add_argument('--train-warmup-steps',type=int,default=300)
+    p.add_argument('--min-lr-ratio',type=float,default=.1); p.add_argument('--grad-clip',type=float,default=1.)
+    p.add_argument('--eval-samples',type=int); p.add_argument('--eval-sample-seed',type=int,default=42)
     p.add_argument('--weight-decay',type=float,default=.01); p.add_argument('--max-steps',type=int)
     p.add_argument('--save-every',type=int,default=100); p.add_argument('--warmup',type=int,default=30)
     p.add_argument('--audit',action='store_true'); p.add_argument('--force-keep-all',action='store_true')
@@ -214,8 +293,10 @@ def main():
     p.add_argument('--alignment-weight',type=float,default=.2); p.add_argument('--aux-weight',type=float,default=.2)
     args=p.parse_args()
     if args.batch_size<1 or args.save_every<1 or args.epochs<1 or args.alignment_weight<0 or args.aux_weight<0 or args.pseudo_weight<0 or args.pseudo_warmup<0: p.error('Invalid training settings')
+    if args.lr <= 0 or args.train_warmup_steps < 0 or not 0 <= args.min_lr_ratio <= 1 or args.grad_clip < 0: p.error('Invalid optimizer policy')
+    if args.eval_samples is not None and (args.mode!='eval' or args.eval_samples<1 or args.limit is not None): p.error('Use positive --eval-samples only in eval, without --limit')
     if args.mode=='eval' and not args.checkpoint: p.error('Evaluation requires checkpoint')
-    if args.mode=='train' and args.force_keep_all: p.error('Training always uses all categories')
+    if args.mode=='train' and args.force_keep_all: p.error('--force-keep-all is evaluation only; use --no-route-train for full-vocabulary training')
     torch.set_num_threads(2); torch.manual_seed(args.seed)
     torch.backends.cuda.matmul.allow_tf32=False; torch.backends.cudnn.allow_tf32=False
     state=torch.load(args.checkpoint,map_location='cpu',weights_only=True) if args.checkpoint else None
@@ -240,6 +321,7 @@ def main():
           'weight_decay':args.weight_decay,'alignment_weight':args.alignment_weight,'aux_weight':args.aux_weight,'pseudo_weight':args.pseudo_weight,'pseudo_warmup':args.pseudo_warmup,
           'limit':args.limit,'split':split,'trainable_parameters':sum(p.numel() for p in model.parameters() if p.requires_grad),
           'torch':str(torch.__version__),'device':str(args.device),'dtype':'float32','tf32':False, 'checkpoint_train_manifest': state['metadata']['manifest'] if state else None}
+    meta['training_policy'] = training_policy(args, data) if args.mode=='train' else state['metadata'].get('training_policy')
     args.output.mkdir(parents=True,exist_ok=True)
     if args.mode=='train':
         if (args.output/'state.pt').exists() and not args.checkpoint: p.error('Refusing to overwrite a prior run; use a new directory or resume')
