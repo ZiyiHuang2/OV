@@ -103,13 +103,34 @@ class TestProtocol(unittest.TestCase):
         self.assertTrue(all(x>=y for x,y in zip(values[2:],values[3:])))
     def test_formal_schedule(self):
         runner = read_runner()
-        args = SimpleNamespace(batch_size=8, epochs=5, lr_schedule='cosine',
-                               train_warmup_steps=300, min_lr_ratio=.1, grad_clip=1.)
-        policy = runner.training_policy(args, range(18076))
-        self.assertEqual(policy['planned_steps'], 11300)
-        self.assertEqual(policy['warmup_steps'], 300)
-        for step, lr in ((0, 1e-3/300), (299, 1e-3), (300, 1e-3), (11299, 1e-4)):
-            self.assertAlmostEqual(runner.step_lr(1e-3, step, policy), lr)
+        for batch_size, epochs, planned_steps in ((8, 5, 11300), (24, 15, 11310)):
+            with self.subTest(batch_size=batch_size, epochs=epochs):
+                args = SimpleNamespace(batch_size=batch_size, epochs=epochs, lr_schedule='cosine',
+                                       train_warmup_steps=300, min_lr_ratio=.1, grad_clip=1.)
+                policy = runner.training_policy(args, range(18076))
+                self.assertEqual(policy['planned_steps'], planned_steps)
+                self.assertEqual(policy['warmup_steps'], 300)
+                for step, lr in ((0, 1e-3/300), (299, 1e-3), (300, 1e-3), (planned_steps-1, 1e-4)):
+                    self.assertAlmostEqual(runner.step_lr(1e-3, step, policy), lr)
+    def test_fifteen_epoch_checkpoints(self):
+        runner = read_runner()
+        data = FixtureData()
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            args = SimpleNamespace(output=out, max_steps=None, epochs=15, seed=42, batch_size=6,
+                                   workers=0, device='cpu', lr=.001, weight_decay=.01,
+                                   alignment_weight=.2, aux_weight=.2, pseudo_weight=.05, pseudo_warmup=0,
+                                   audit=False, save_every=500, lr_schedule='cosine', train_warmup_steps=1,
+                                   min_lr_ratio=.1, grad_clip=1.)
+            meta = {'training_policy': runner.training_policy(args, data)}
+            result = runner.train(args, FixtureModel(), data, meta, None)
+            self.assertEqual(result['completed_epochs'], 15)
+            self.assertEqual({p.name for p in out.glob('*.pt')},
+                             {'epoch_005.pt', 'epoch_010.pt', 'final.pt', 'state.pt'})
+            for name, epoch in (('epoch_005.pt', 5), ('epoch_010.pt', 10), ('final.pt', 15)):
+                export = torch.load(out/name, weights_only=True)
+                self.assertEqual((export['epoch'], export['steps'], export['checkpoint_kind']),
+                                 (epoch, epoch, 'evaluation_only'))
     def fixture(self,root):
         (root/'classes.json').write_text(json.dumps(['a','b','c']))
         y=np.array([[0,1,2,255],[0,1,2,255]],dtype=np.uint8)

@@ -138,6 +138,7 @@ def train(args, model, data, meta, state):
         torch.cuda.reset_peak_memory_stats()
     audit = progress['audit']
     frozen = [(p, p._version) for name, p in model.named_parameters() if not name.startswith('core.')]
+    dev_epochs = (5, 10) if args.epochs == 15 else (1, 3)
     for epoch in range(start_epoch, args.epochs):
         order = data_order(data, args.seed, epoch)
         cursor = start_cursor if epoch == start_epoch else 0
@@ -194,11 +195,11 @@ def train(args, model, data, meta, state):
                        'last_lr': opt.param_groups[0]['lr'], **stats_summary(progress['current'])}
             progress['epochs'].append(summary)
             progress['current'] = blank_stats()
-            # Stage 1/3 are needed for the fixed dev curve only. Final is a
-            # separate lightweight export; never duplicate it as epoch_005.
+            # Keep lightweight exports for the scheduled dev curve and a
+            # separate final export for full validation.
             if epoch+1 == args.epochs:
                 save_eval(args.output / 'final.pt', model, meta, epoch+1, steps, seen)
-            elif epoch+1 in (1, 3):
+            elif epoch+1 in dev_epochs:
                 save_eval(args.output / f'epoch_{epoch+1:03d}.pt', model, meta, epoch+1, steps, seen)
             # Write snapshots first: a crash cannot advance the recovery cursor
             # past an epoch whose required evaluation export does not exist.

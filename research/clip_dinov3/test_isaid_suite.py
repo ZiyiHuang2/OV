@@ -24,14 +24,17 @@ a, _ = p.parse_known_args()
 a.output.mkdir(parents=True, exist_ok=True)
 manifest = json.loads(a.manifest.read_text())
 if a.mode == 'train':
-    for name in ['state', 'final'] + (['epoch_001', 'epoch_003'] if a.epochs == 5 else []):
+    stages = {5: [1, 3], 15: [5, 10]}.get(a.epochs, [])
+    for name in ['state', 'final'] + [f'epoch_{e:03d}' for e in stages]:
         (a.output / (name + '.pt')).write_text(name)
     report = {'config': {'variant': a.variant}, 'completed_epochs': a.epochs,
-              'steps': a.epochs * 3, 'training_policy': {'epochs': a.epochs}}
+              'steps': a.epochs * 3, 'training_policy': {'epochs': a.epochs},
+              'batch_size': a.batch_size, 'gpu': os.environ.get('CUDA_VISIBLE_DEVICES')}
 else:
     assert a.checkpoint.is_file(), a.checkpoint
     variant = a.checkpoint.parent.parent.name
-    epoch = int(a.checkpoint.stem[-3:]) if a.checkpoint.stem.startswith('epoch') else (1 if 'preflight' in a.checkpoint.parts else 5)
+    epoch = (int(a.checkpoint.stem[-3:]) if a.checkpoint.stem.startswith('epoch')
+             else json.loads((a.checkpoint.parent / 'report.json').read_text())['completed_epochs'])
     bad = os.environ.get('BAD_STAGE') == a.output.name
     report = {'config': {'variant': variant}, 'checkpoint_epoch': epoch - bad,
               'checkpoint_kind': 'evaluation_only', 'checkpoint_steps': epoch * 3,
@@ -67,9 +70,10 @@ def verify(launcher):
         for args in (("init", "-q"), ("add", "."), ("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture")):
             subprocess.run(["git", *args], cwd=root, check=True)
 
-        def run(phase, manifest=good, dest="run", **env):
-            result = subprocess.run(["bash", "run_isaid_suite.sh", phase, str(manifest), "clip.pt", "dino.pt", dest, "8"],
-                                    cwd=root, env={**os.environ, "PYTHON": sys.executable, **env},
+        def run(phase, manifest=good, dest="run", batch=8, **env):
+            result = subprocess.run(["bash", "run_isaid_suite.sh", phase, str(manifest), "clip.pt", "dino.pt", dest, str(batch)],
+                                    cwd=root, env={**os.environ, "PYTHON": sys.executable, "CSERIES_EPOCHS": "5",
+                                                   "CSERIES_GPU_IDS": "", "KEEP_FINAL_STATE": "0", **env},
                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             return result.returncode, result.stdout
 
@@ -111,8 +115,26 @@ def verify(launcher):
         code, log = run("main", dest="keep", KEEP_FINAL_STATE="1")
         assert not code, log
         assert sorted(p.name for p in (root / "keep/main").glob("**/*.pt")) == ["final.pt"] * 9 + ["state.pt"] * 9
+        long = {"CSERIES_EPOCHS": "15", "CSERIES_GPU_IDS": "gpu-a,gpu-b"}
+        code, log = run("main", **long)
+        assert code and "Protocol changed" in log, log
+        code, log = run("preflight", dest="long", batch=24, **long)
+        assert not code, log
+        code, log = run("main", dest="long", batch=24, **long)
+        assert not code, log
+        run_dir = root / "long/main"
+        assert sorted(p.name for p in run_dir.glob("**/*.pt")) == ["final.pt"] * 9
+        for gpu, variants in (("gpu-a", ("C0", "D0", "C2", "C3", "C5")),
+                              ("gpu-b", ("B0", "C1", "C4", "C6"))):
+            for v in variants:
+                model = run_dir / v
+                report = json.loads((model / "train/report.json").read_text())
+                assert (report["gpu"], report["batch_size"], report["completed_epochs"]) == (gpu, 24, 15)
+                assert {d.name for d in model.glob("dev_epoch_*")} == {"dev_epoch_005", "dev_epoch_010", "dev_epoch_015"}
+        assert "dev_epoch_010" in (run_dir / "summary.csv").read_text()
+        assert (run_dir / "C6/keep_all/report.json").is_file()
     assert not failures, failures
-    print("PASS: full-data gate under -O, preflight cleanup, incomplete-train resume gate, failed-eval retention, retry and KEEP_FINAL_STATE")
+    print("PASS: data gate, checkpoint retention and recovery, and matched 15-epoch schedule on two GPU lanes")
 
 
 if __name__ == "__main__":
