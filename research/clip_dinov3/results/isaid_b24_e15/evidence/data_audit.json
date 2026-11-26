@@ -1,0 +1,98 @@
+{
+  "source": "isaid_ovsbench_ready_20261124/manifest.json",
+  "source_manifest_sha256": "f9be091fa139c038691478cd162bc0c8af5629a4328e959cd19e896b06e8dc57",
+  "classes_by_id": [
+    "ship",
+    "storage tank",
+    "baseball diamond",
+    "tennis court",
+    "basketball court",
+    "ground track field",
+    "bridge",
+    "large vehicle",
+    "small vehicle",
+    "helicopter",
+    "swimming pool",
+    "roundabout",
+    "soccer ball field",
+    "plane",
+    "harbor"
+  ],
+  "ignore_label": 255,
+  "scope": "all_existing_rows",
+  "train": {
+    "published_count": 18076,
+    "manifest_count": 18076,
+    "candidates": 18076,
+    "valid_decoded_pairs": 18076,
+    "images": 18076,
+    "masks": 18076,
+    "physical_same_name_pairs": 18076,
+    "manifest_image_name_difference": 0,
+    "manifest_mask_name_difference": 0,
+    "foreground_empty": 0,
+    "modes": {
+      "RGB/L": 18076
+    },
+    "sizes": {
+      "256x256": 18076
+    },
+    "pixels_by_id": {
+      "0": 43136328,
+      "1": 14932751,
+      "2": 8181796,
+      "3": 41206459,
+      "4": 12034715,
+      "5": 29899453,
+      "6": 2440763,
+      "7": 35351270,
+      "8": 23577098,
+      "9": 658246,
+      "10": 1791927,
+      "11": 4894264,
+      "12": 60125480,
+      "13": 21407271,
+      "14": 28105537,
+      "255": 856885378
+    }
+  },
+  "val": {
+    "published_count": 6363,
+    "manifest_count": 6363,
+    "candidates": 6363,
+    "valid_decoded_pairs": 6363,
+    "images": 6363,
+    "masks": 6363,
+    "physical_same_name_pairs": 6363,
+    "manifest_image_name_difference": 0,
+    "manifest_mask_name_difference": 0,
+    "foreground_empty": 0,
+    "modes": {
+      "RGB/L": 6363
+    },
+    "sizes": {
+      "256x256": 6363
+    },
+    "pixels_by_id": {
+      "0": 16820749,
+      "1": 3385385,
+      "2": 3617267,
+      "3": 12401859,
+      "4": 2516178,
+      "5": 10050250,
+      "6": 1019870,
+      "7": 9465470,
+      "8": 7837272,
+      "9": 55156,
+      "10": 704487,
+      "11": 693717,
+      "12": 19482627,
+      "13": 12335011,
+      "14": 14996290,
+      "255": 301623980
+    }
+  },
+  "shared_sample_id": 0,
+  "shared_scene_prefix": 0,
+  "shared_image_sha256": 0
+}

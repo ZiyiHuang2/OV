@@ -1,5 +1,7 @@
 # CLIP + DINOv3 双分支分割
 
+九组 C-series 的正式实验采用 batch 24、15 轮。全量 iSAID 验证结果、分支分析、资源用量及原始报告见 [C-series 正式实验归档](results/isaid_b24_e15/README.md)。下文记录早期单轮双分支基线。
+
 冻结 OpenAI CLIP ViT-B/16、DINOv3 ViT-B/16 Web 和 CLIP 文本编码器。输入缩放到 384 × 384，两路视觉特征在相同的 24 × 24 patch 网格对齐。拼接后的 1,280 维特征经线性层投影到 512 维，再与冻结的 CLIP 文本向量计算余弦相似度。对上采样后的像素 logits 使用交叉熵。双分支投影初始化为 `[I, 0]`，起始输出与 CLIP-only 一致。该实验独立于 CAT-Seg 和 Route B。
 
 ## iSAID 结果

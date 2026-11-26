@@ -1,0 +1,65 @@
+{
+  "source_manifest_sha256": "f9be091fa139c038691478cd162bc0c8af5629a4328e959cd19e896b06e8dc57",
+  "images": 192,
+  "workers": 4,
+  "size": 384,
+  "fp32": true,
+  "runs": [
+    {
+      "variant": "C1",
+      "batch": 48,
+      "status": "ok",
+      "updates": 4,
+      "gpu_free_mib_at_start": 21267.1,
+      "steady_images_per_second": 88.45721196050775,
+      "forward_to_optimizer_images_per_second": 90.44275779281317,
+      "wall_images_per_second": 50.55507919643305,
+      "peak_allocated_mib": 9756.1787109375,
+      "peak_reserved_mib": 11946.0,
+      "process_resident_mib_at_end": 12468,
+      "mean_preclip_grad_norm": 14.529222667217255
+    },
+    {
+      "variant": "C1",
+      "batch": 24,
+      "status": "ok",
+      "updates": 8,
+      "gpu_free_mib_at_start": 21029.1,
+      "steady_images_per_second": 84.03772295248038,
+      "forward_to_optimizer_images_per_second": 87.46696219976815,
+      "wall_images_per_second": 59.2773201857544,
+      "peak_allocated_mib": 5385.9267578125,
+      "peak_reserved_mib": 6386.0,
+      "process_resident_mib_at_end": 6908,
+      "mean_preclip_grad_norm": 15.000149250030518
+    },
+    {
+      "variant": "C1",
+      "batch": 48,
+      "status": "ok",
+      "updates": 4,
+      "gpu_free_mib_at_start": 21027.1,
+      "steady_images_per_second": 89.0581395729791,
+      "forward_to_optimizer_images_per_second": 90.81095830838215,
+      "wall_images_per_second": 62.85258476772665,
+      "peak_allocated_mib": 9756.0068359375,
+      "peak_reserved_mib": 11954.0,
+      "process_resident_mib_at_end": 12476,
+      "mean_preclip_grad_norm": 14.529223501682281
+    },
+    {
+      "variant": "C1",
+      "batch": 24,
+      "status": "ok",
+      "updates": 8,
+      "gpu_free_mib_at_start": 21027.1,
+      "steady_images_per_second": 81.72853953836353,
+      "forward_to_optimizer_images_per_second": 84.74611269691788,
+      "wall_images_per_second": 58.67177590619943,
+      "peak_allocated_mib": 5385.9267578125,
+      "peak_reserved_mib": 6386.0,
+      "process_resident_mib_at_end": 6908,
+      "mean_preclip_grad_norm": 15.000149428844452
+    }
+  ]
+}
