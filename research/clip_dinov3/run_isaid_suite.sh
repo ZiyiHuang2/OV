@@ -190,6 +190,11 @@ run_variant() {
       if (( ! tracked )); then rm -f -- "$dest/train/epoch_$e.pt"; fi
     done
     run_job "$dest/dev_epoch_$final_epoch" "$v" "$epochs" eval "${common[@]}" "${weights[@]}" "${loss_flags[@]}" --batch-size 1 --workers 2 --warmup 0 --eval-samples 512 --eval-sample-seed 42 --checkpoint "$dest/train/final.pt"
+    if [[ "$epochs" == 40 ]]; then
+      for e in 015 030; do
+        run_job "$dest/full_epoch_$e" "$v" "$((10#$e))" eval "${common[@]}" "${weights[@]}" "${loss_flags[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$dest/train/epoch_$e.pt"
+      done
+    fi
     run_job "$dest/eval" "$v" "$epochs" eval "${common[@]}" "${weights[@]}" "${loss_flags[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$dest/train/final.pt"
     if [[ "$v" == C6 ]]; then
       run_job "$dest/keep_all" "$v" "$epochs" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$dest/train/final.pt" --force-keep-all
@@ -260,6 +265,8 @@ root=Path(sys.argv[1]); rows=[]
 checks=('eval', 'keep_all', *(f'dev_epoch_{epoch}' for epoch in sys.argv[5:]))
 if sys.argv[3:5] == ['external', '40']:
     checks=('epoch_015', 'epoch_030', 'eval')
+elif sys.argv[3:5] == ['main', '40']:
+    checks=('full_epoch_015', 'full_epoch_030', *checks)
 for v in sys.argv[2].split(','):
     for sub in checks:
         p=root/v/sub/'report.json'

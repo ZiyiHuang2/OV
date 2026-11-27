@@ -219,6 +219,11 @@ def verify(launcher):
             run_root = tracked_dir / variant
             assert sorted(p.name for p in run_root.glob("train/*.pt")) == [
                 "best.pt", "epoch_015.pt", "epoch_030.pt", "final.pt"]
+            for epoch in (15, 30):
+                complete = json.loads((run_root / f"full_epoch_{epoch:03d}/report.json").read_text())
+                assert complete["checkpoint_epoch"] == epoch
+                assert complete["images"] == len(manifest["val"])
+                assert complete["mean_pixel_cross_entropy"] == 0.3
             assert (run_root / "train/best.pt").read_text() == "epoch_018"
             assert json.loads((run_root / "train/best.json").read_text())["epoch"] == 18
             assert json.loads((run_root / "train/report.json").read_text())["seed"] == 43

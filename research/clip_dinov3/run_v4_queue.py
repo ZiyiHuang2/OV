@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+from shutil import disk_usage
 from statistics import median
 import subprocess
 import sys
@@ -20,6 +21,8 @@ from prepare_isaid import CLASSES, SPLIT_SIZES
 
 HERE = Path(__file__).resolve().parent
 FORMAL_PROMPT = "a photo of a {}."
+GIB = 1 << 30
+DEFAULT_MIN_FREE_GIB = 20.
 
 
 @dataclass(frozen=True)
@@ -69,7 +72,8 @@ EXTRA = {
 }
 EXTRA_ANCHORS = {"resolution": ("T01", "T03"), "relations": ("T02", "T04")}
 DIAGNOSTIC_ANCHORS = ("T01", "T03")
-PRIORITY = {"fixed": 0, "promotion": 1, "extra": 2, "reserve": 3, "diagnostic": 4}
+PRIORITY = {"history": 0, "preflight": 0, "fixed": 1, "promotion": 2, "extra": 3, "reserve": 4, "diagnostic": 5}
+NON_TRAINING = frozenset(("history", "diagnostic", "preflight"))
 TRANSIENT_ERRNOS = {errno.EAGAIN, errno.EBUSY, errno.EIO, errno.ESTALE, errno.ETIMEDOUT,
                     errno.ECONNRESET, errno.ENETDOWN}
 TRANSIENT_LOG = re.compile(
@@ -179,12 +183,13 @@ def dev_result(path, run, *, development=True):
 
 
 def promotions(root, reference_root, minimum_delta, limit, requested_ids=None, audit=None, *,
-               external_manifests=(), class_groups=None):
+               external_manifests=(), class_groups=None, historical_evidence_root=None):
     from v4_decisions import promotion_candidates, select_promotions
 
     ranked, decisions = promotion_candidates(
         root, reference_root, minimum_delta, FIXED, dev_result, requested_ids, audit,
         external_manifests=external_manifests, class_groups=class_groups,
+        historical_evidence_root=historical_evidence_root,
     )
     return select_promotions(ranked, decisions, FIXED, limit)
 
@@ -243,8 +248,14 @@ def read_tail(path, start=0):
 
 def launch_phase(command, env, log_path, stage_path, stage, retries):
     failures = []
+    floor = int(env.get("CSERIES_MIN_FREE_BYTES", 0))
     for attempt in range(1, retries + 2):
         current = {**stage, "attempt": attempt, "started_at": time(), "pid": None}
+        disk = disk_state(stage_path.parent, floor)
+        if disk["blocked"]:
+            failure = {**stage, "attempt": attempt, "reason": "disk_low_watermark", "disk": disk}
+            write_json(stage_path, {**current, "phase": "paused_disk", "last_failure": failure})
+            return False, [*failures, failure]
         write_json(stage_path, current)
         try:
             with log_path.open("ab") as log:
@@ -269,6 +280,20 @@ def launch_phase(command, env, log_path, stage_path, stage, retries):
         sleep(min(5 * attempt, 15))
 
 
+def disk_state(path, floor):
+    free = disk_usage(path).free
+    return {"free_bytes": free, "min_free_bytes": floor, "blocked": free < floor}
+
+
+def disk_floor(args):
+    return int(getattr(args, "min_free_gib", 0) * GIB)
+
+
+def queue_artifact(args, name):
+    mode = "queue_preflight" if getattr(args, "preflight_only", False) else "queue"
+    return f"{mode}_{name}.json"
+
+
 def run_job(run, gpu, args):
     out = args.output / run.id
     out.mkdir(exist_ok=True)
@@ -283,14 +308,22 @@ def run_job(run, gpu, args):
            "CSERIES_SEED": str(run.seed), "CSERIES_C2_CONTROL": run.control,
            "CSERIES_SIZE": str(run.size), "CSERIES_UNATTENDED": "1", "CSERIES_TRACK_DEVELOPMENT": "1",
            "KEEP_FINAL_STATE": "0" if getattr(args, "discard_final_state", False) else "1",
-           "CSERIES_DATA_AUDIT": str(args.output / "isaid_data_audit.json")}
+           "CSERIES_DATA_AUDIT": str(args.output / "isaid_data_audit.json"),
+           "CSERIES_MIN_FREE_BYTES": str(disk_floor(args))}
     launcher = ["bash", str(HERE / "run_isaid_suite.sh")]
     operands = [str(p) for p in (args.manifest, args.clip_weights, args.dino_weights, out)] + [str(args.batch_size)]
-    stages = [("preflight", None), ("main", None)]
-    if not run.split:
-        stages += [("external", path) for path in args.external_manifest]
+    preflight_only = getattr(args, "preflight_only", False)
+    stages = [("preflight", None)]
+    if not preflight_only:
+        stages.append(("main", None))
+        if not run.split:
+            stages += [("external", path) for path in args.external_manifest]
     attempts, external_failures = [], []
     for phase, external in stages:
+        disk = disk_state(args.output, disk_floor(args))
+        if disk["blocked"]:
+            return {"state": "blocked", "reason": "disk_low_watermark", "next_phase": phase,
+                    "disk": disk, "attempt_failures": attempts, "external_failures": external_failures}
         phase_env = {**env, "EXTERNAL_MANIFEST": str(external or "")}
         stage = {"phase": phase, "manifest": str(external) if external else None}
         success, failures = launch_phase(
@@ -299,6 +332,11 @@ def run_job(run, gpu, args):
         )
         attempts.extend(failures)
         if not success:
+            disk = disk_state(args.output, disk_floor(args))
+            if disk["blocked"] or failures[-1].get("reason") == "disk_low_watermark":
+                return {"state": "blocked", "reason": "disk_low_watermark", "next_phase": phase,
+                        "disk": failures[-1].get("disk", disk), "attempt_failures": attempts,
+                        "external_failures": external_failures}
             if phase != "external":
                 return {"state": "failed", "failed_phase": phase, "attempt_failures": attempts}
             external_failures.append(failures[-1])
@@ -316,6 +354,10 @@ class Task:
 
 
 def run_task(task, gpu, args):
+    if task.category == "history":
+        from v4_history import run_history
+
+        return run_history(task.run, gpu, args)
     if task.category == "diagnostic":
         from v4_diagnostics import run_diagnostics
 
@@ -338,7 +380,7 @@ def optional_external_manifest_paths(source, paths):
 
 
 def task_progress(task, args):
-    if task.category == "diagnostic":
+    if task.category in ("history", "diagnostic"):
         return {}
     out = args.output / task.run.id
     try:
@@ -374,11 +416,11 @@ def live_state(args, ready, active, waiting, results, timings):
         elapsed = now - started
         progress = task_progress(task, args)
         lanes[gpu] = {"id": task.id, "category": task.category, "elapsed_seconds": round(elapsed, 1), **progress}
-        if rate is not None and task.category != "diagnostic":
+        if rate is not None and task.category not in NON_TRAINING:
             estimates.append(max(rate * epoch_work(task) - elapsed, 0.))
     eta = None
     if rate is not None:
-        queued = sum(epoch_work(task) for task in ready if task.category != "diagnostic") * rate
+        queued = sum(epoch_work(task) for task in ready if task.category not in NON_TRAINING) * rate
         eta = round(max(max(estimates, default=0.), (queued + sum(estimates)) / len(args.gpu)))
     return {"updated_at_unix": time(), "active_by_gpu": lanes, "ready": [task.id for task in ready],
             "waiting_on_evidence": waiting,
@@ -396,6 +438,7 @@ def resolve_promotions(args, audit):
                 "threshold_pp": args.promote_min_delta, "limit": args.promotion_limit,
                 "requested_ids": sorted(args.ids or []),
                 "external_manifests": [str(path) for path in args.promotion_external_manifest],
+                "historical_evidence_root": str(args.output / "history" / "external"),
                 "class_groups": args.promotion_class_groups}
     if path.is_file():
         plan = read_json(path)
@@ -406,6 +449,7 @@ def resolve_promotions(args, audit):
         selected, decisions = promotions(
             args.output, args.reference_root, args.promote_min_delta, args.promotion_limit, args.ids, audit,
             external_manifests=args.promotion_external_manifest, class_groups=args.promotion_class_groups,
+            historical_evidence_root=args.output / "history" / "external",
         )
         write_json(path, {"protocol": protocol, "selected": [asdict(run) for run in selected],
                           "decisions": decisions})
@@ -416,18 +460,29 @@ def resolve_promotions(args, audit):
 def run_queue(runs, args, *, audit=None):
     from v4_decisions import promotion_dependencies
 
-    ready = [Task(run, "reserve" if run in RESERVE else "fixed") for run in runs
-             if not any(run in pair for pair in EXTRA.values())]
+    preflight_only = getattr(args, "preflight_only", False)
+    ready = [Task(run, "preflight" if preflight_only else "reserve" if run in RESERVE else "fixed")
+             for run in runs if preflight_only or not any(run in pair for pair in EXTRA.values())]
     extra = {group: [run for run in pair if run in runs]
-             for group, pair in EXTRA.items() if any(run in runs for run in pair)}
-    diagnostics = {run.id: run for run in runs if getattr(args, "diagnostics", False)
+             for group, pair in EXTRA.items() if not preflight_only and any(run in runs for run in pair)}
+    diagnostics = {run.id: run for run in runs if not preflight_only and getattr(args, "diagnostics", False)
                    and run.id in DIAGNOSTIC_ANCHORS}
     enabled = {task.id for task in ready}
-    pending_promotion = getattr(args, "promote_min_delta", None) is not None
-    promotion_needs = (promotion_dependencies(getattr(args, "ids", None)) & enabled) if pending_promotion else set()
+    pending_promotion = not preflight_only and getattr(args, "promote_min_delta", None) is not None
+    promotion_needs = promotion_dependencies(getattr(args, "ids", None)) & enabled if pending_promotion else set()
+    histories = getattr(args, "history_runs", ()) if not preflight_only else ()
+    if pending_promotion:
+        promotion_needs.update(
+            run.id for run in histories if not run.source and run.variant in ("C0", "B0", "C2")
+            and run.manifest in args.promotion_external_manifest
+        )
+    ready.extend(Task(run, "history") for run in histories)
     results, active, timings = {}, {}, []
     all_results = {}
-    for path in sorted(args.output.glob("*/queue_status.json")):
+    status_name = queue_artifact(args, "status")
+    summary_path = args.output / queue_artifact(args, "summary")
+    live_path = args.output / queue_artifact(args, "live")
+    for path in sorted(args.output.glob(f"*/{status_name}")):
         try:
             all_results[path.parent.name] = read_json(path)
         except (OSError, ValueError) as exc:
@@ -437,11 +492,11 @@ def run_queue(runs, args, *, audit=None):
         try:
             directory = args.output / task_id
             directory.mkdir(exist_ok=True)
-            write_json(directory / "queue_status.json", status)
+            write_json(directory / status_name, status)
         except OSError as exc:
             status = {"state": "failed", "reason": f"Cannot write queue status: {exc}", "job_status": status}
         results[task_id] = all_results[task_id] = status
-        write_json(args.output / "queue_summary.json", all_results)
+        write_json(summary_path, all_results)
 
     with ThreadPoolExecutor(max_workers=len(args.gpu)) as pool:
         while True:
@@ -466,18 +521,28 @@ def run_queue(runs, args, *, audit=None):
 
             ready.sort(key=lambda task: PRIORITY[task.category])
             occupied = {gpu for _, gpu, _ in active.values()}
+            disk = disk_state(args.output, disk_floor(args))
             for gpu in (gpu for gpu in args.gpu if gpu not in occupied):
-                if not ready:
+                if not ready or disk["blocked"]:
                     break
-                task = ready.pop(0)
+                # Reserve one lane for new training while history runs in parallel.
+                history_active = any(task.category == "history" for task, _, _ in active.values())
+                index = next((i for i, task in enumerate(ready) if task.category != "history"), 0) if history_active else 0
+                task = ready.pop(index)
                 started = monotonic()
                 active[pool.submit(run_task, task, gpu, args)] = task, gpu, started
+                disk = disk_state(args.output, disk_floor(args))
             waiting = {run.id: sorted(set(EXTRA_ANCHORS[group]) - results.keys())
                        for group, group_runs in extra.items() for run in group_runs}
             waiting.update({f"I-{anchor}": [anchor] for anchor in diagnostics})
             if pending_promotion:
                 waiting["promotions"] = sorted(promotion_needs - results.keys())
-            write_json(args.output / "queue_live.json", live_state(args, ready, active, waiting, results, timings))
+            if ready and disk["blocked"] and not active:
+                for task in ready:
+                    finish(task.id, {"state": "blocked", "category": task.category,
+                                     "reason": "disk_low_watermark", "disk": disk})
+            write_json(live_path, {**live_state(args, ready, active, waiting, results, timings),
+                                   "disk": disk, "admission_paused": bool(ready and disk["blocked"])})
             if not active:
                 break
 
@@ -490,7 +555,7 @@ def run_queue(runs, args, *, audit=None):
                 except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
                     status = {"state": "failed", "reason": str(exc)}
                 status.update(category=task.category, gpu=gpu, wall_seconds=round(elapsed, 2))
-                if status["state"] == "complete" and task.category != "diagnostic" and elapsed >= 60:
+                if status["state"] == "complete" and task.category not in NON_TRAINING and elapsed >= 60:
                     timings.append(elapsed / epoch_work(task))
                 finish(task.id, status)
                 print(f"{task.id} {status['state']} on {gpu}", flush=True)
@@ -508,6 +573,12 @@ def main():
     reserve.add_argument("--include-reserve", action="store_true", help="Include reserves in a dry run")
     reserve.add_argument("--no-reserve", action="store_true", help="Exclude reserves from execution")
     parser.add_argument("--diagnostics", action="store_true", help="Run inference diagnostics after T01/T03")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--history", action="store_true", help="Evaluate historical checkpoints alongside new training")
+    modes.add_argument("--history-only", action="store_true", help="Evaluate historical checkpoints without training")
+    modes.add_argument("--preflight-only", action="store_true", help="Run the full-data CUDA preflight only")
+    parser.add_argument("--min-free-gib", type=float, default=DEFAULT_MIN_FREE_GIB,
+                        help="Pause new work below this free disk space on the output filesystem (default: 20 GiB)")
     parser.add_argument("--discard-final-state", action="store_true", help="Remove the completed optimizer state")
     parser.add_argument("--retries", type=int, default=1, help="Extra attempts for transient stage failures, 0–3")
     parser.add_argument("--extra", choices=EXTRA, action="append", default=[])
@@ -520,9 +591,17 @@ def main():
                         help="JSON object mapping preregistered group names to iSAID class lists")
     parser.add_argument("--execute", action="store_true", help="Start jobs, otherwise print the resolved plan")
     args = parser.parse_args()
+    if not math.isfinite(args.min_free_gib) or args.min_free_gib < 0:
+        parser.error("--min-free-gib must be finite and non-negative")
+    if (args.history or args.history_only) and args.reference_root is None:
+        parser.error("--history and --history-only require --reference-root")
+    if (args.history_only or args.preflight_only) and (args.promote_min_delta is not None or args.diagnostics):
+        parser.error("Promotion and diagnostics require the training queue")
     use_reserves = args.include_reserve or (args.execute and not args.no_reserve)
     runs = [*FIXED, *(RESERVE if use_reserves else ())]
     runs.extend(run for name in dict.fromkeys(args.extra) for run in EXTRA[name])
+    if args.history_only:
+        runs = []
     if args.ids:
         if len(set(args.ids)) != len(args.ids) or set(args.ids) - {r.id for r in runs}:
             parser.error("--ids must list distinct IDs from the enabled queue")
@@ -546,8 +625,20 @@ def main():
                 raise ValueError("Expected unique iSAID class names in nonempty JSON groups")
         except (OSError, ValueError) as exc:
             parser.error(str(exc))
-    print(json.dumps([asdict(run) for run in runs], indent=2), flush=True)
+    def print_plan(history=()):
+        if history:
+            plan = {"training": [asdict(run) for run in runs], "history": [asdict(run) for run in history]}
+        else:
+            plan = [asdict(run) for run in runs]
+        print(json.dumps(plan, indent=2, default=str), flush=True)
+
     if not args.execute:
+        if args.history or args.history_only:
+            from v4_history import history_runs
+
+            print_plan(history_runs(args))
+        else:
+            print_plan()
         return
     if (not args.output or not args.gpu or any(not gpu or "," in gpu for gpu in args.gpu)
             or len(set(args.gpu)) != len(args.gpu) or args.batch_size < 1):
@@ -565,6 +656,12 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     with (args.output / ".queue.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        disk = disk_state(args.output, disk_floor(args))
+        if disk["blocked"]:
+            write_json(args.output / queue_artifact(args, "live"),
+                       {"updated_at_unix": time(), "admission_paused": True, "disk": disk,
+                        "ready": [run.id for run in runs], "active_by_gpu": {}})
+            raise SystemExit(f"Output filesystem below the free-space floor: {disk['free_bytes'] / GIB:.1f} GiB free")
         audit = audit_isaid(args.manifest, args.output / "isaid_data_audit.json")
         args.external_manifest, args.skipped_external_manifests = optional_external_manifest_paths(
             args.manifest, args.external_manifest)
@@ -572,8 +669,15 @@ def main():
             print(f"Skipped optional external manifest {skipped['path']}: {skipped['reason']}", flush=True)
         write_json(args.output / "external_manifest_status.json",
                    {"accepted": [str(path) for path in args.external_manifest], "skipped": args.skipped_external_manifests})
+        if args.history or args.history_only:
+            from v4_history import history_runs
+
+            args.history_runs = history_runs(args)
+        print_plan(getattr(args, "history_runs", ()))
         results = run_queue(runs, args, audit=audit)
-    raise SystemExit(any(status["state"] == "failed" and status.get("category") != "diagnostic"
+    raise SystemExit(any(status.get("reason") == "disk_low_watermark"
+                         or (status["state"] == "failed" and status.get("category") not in ("diagnostic", "history"))
+                         or (args.history_only and status["state"] != "complete")
                          for status in results.values()))
 
 

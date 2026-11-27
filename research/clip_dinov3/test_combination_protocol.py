@@ -147,6 +147,30 @@ class TestProtocol(unittest.TestCase):
                 self.assertNotIn('progress',stage)
                 self.assertFalse((root/'final.pt').exists())
             self.assertEqual(aa['optimizer']['param_groups'],bb['optimizer']['param_groups'])
+    def test_disk_floor_pauses_with_recoverable_final_batch(self):
+        runner = read_runner()
+        data = FixtureData()
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            args = SimpleNamespace(output=out, max_steps=None, epochs=1, seed=42, batch_size=6,
+                                   workers=0, device='cpu', lr=.001, weight_decay=.01,
+                                   alignment_weight=.2, aux_weight=.2, pseudo_weight=.05, pseudo_warmup=0,
+                                   audit=False, save_every=500, lr_schedule='constant',
+                                   train_warmup_steps=0, min_lr_ratio=.1, grad_clip=1.)
+            meta = {'training_policy': runner.training_policy(args, data)}
+            with patch.dict(runner.os.environ, {'CSERIES_MIN_FREE_BYTES': '10'}), \
+                 patch.object(runner, 'disk_usage', return_value=SimpleNamespace(free=9)):
+                with self.assertRaises(SystemExit) as stopped:
+                    runner.train(args, FixtureModel(), data, meta, None)
+            self.assertEqual(stopped.exception.code, 75)
+            state = torch.load(out / 'state.pt', weights_only=True)
+            self.assertEqual((state['epoch'], state['cursor'], state['steps']), (0, 6, 1))
+            self.assertFalse((out / 'final.pt').is_file())
+            with patch.dict(runner.os.environ, {'CSERIES_MIN_FREE_BYTES': '0'}):
+                report = runner.train(args, FixtureModel(), data, meta, state)
+            self.assertEqual((report['completed_epochs'], report['steps']), (1, 1))
+            self.assertTrue((out / 'final.pt').is_file())
+
     def test_lightweight_final_export(self):
         runner=read_runner(); data=FixtureData()
         with tempfile.TemporaryDirectory() as td:

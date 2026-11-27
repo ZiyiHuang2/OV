@@ -21,8 +21,11 @@ def report(variant, scores, epochs=15):
     for i, score in enumerate(scores):
         matrix[i][i] = score
         matrix[i][len(scores)] = 100 - score
+    weights = {"clip": "pinned-clip"}
+    if variant not in ("C0", "D02"):
+        weights["dinov3"] = "pinned-dino"
     train = {"manifest": "manifest", "data_sha256": "audit", "config": {"variant": variant},
-             "weights": {"clip": "pinned-clip", "dinov3": "pinned-dino"}, "seed": 42,
+             "weights": weights, "seed": 42,
              "size": 384, "batch_size": 24, "lr": .001, "weight_decay": .01, "limit": None,
              "training_policy": {"epochs": epochs}, "alignment_weight": .2}
     return {**train, "checkpoint_training": train, "checkpoint_epoch": epochs,
@@ -51,12 +54,14 @@ class PromotionTest(unittest.TestCase):
         self.root = Path(temporary.name)
         self.reference = self.root / "archive" / "main"
 
-    def rows(self, ids, anchor, short_scores, long_id, anchor_scores=(70,)):
+    def rows(self, ids, anchor, short_scores, long_id, anchor_scores=(70, 70)):
         cells = {}
+        variants = {run.id: run.variant for run in FIXED}
         for name, scores in zip(ids, short_scores, strict=True):
             if scores is not None:
-                cells[name] = report(name, scores)
-                save(report_path(self.root, name, name), cells[name])
+                variant = variants[name]
+                cells[name] = report(variant, scores)
+                save(report_path(self.root, name, variant), cells[name])
         save(self.reference / anchor / "dev_epoch_015" / "report.json", report(anchor, anchor_scores))
         save(report_path(self.root, long_id, anchor, "eval"), report(anchor, anchor_scores, 40))
         return cells
@@ -75,9 +80,112 @@ class PromotionTest(unittest.TestCase):
         self.assertEqual([run.id for run in chosen], ["D02-e40"])
         self.assertEqual([row["state"] for row in decisions], ["selected", "budget"])
 
+    def test_visual_representation_requires_both_controls_and_their_own_anchors(self):
+        pair = ("D01", "D02")
+        self.rows(("D01",), "B0", ((50, 55),), "T01")
+        picked, decision = self.decide(pair)
+        self.assertFalse(picked)
+        self.assertEqual(decision["state"], "incomplete_study")
+        self.assertEqual(decision["cells"][1]["state"], "missing_reports")
+        self.assertEqual(promotion_dependencies(["D01"]), set())
+        self.assertEqual(promotion_dependencies(pair), {
+            "D01", "D02", "T00", "T01", "D01-H1", "D02-H1", "H10", "H11"})
+
+        self.rows(("D02",), "C0", ((70, 70),), "T00")
+        picked, decision = self.decide(pair, limit=1)
+        self.assertFalse(picked)
+        self.assertEqual(decision["state"], "budget")
+        picked, decision = self.decide(pair, limit=2)
+        self.assertEqual(picked, ["D01-e40", "D02-e40"])
+        self.assertEqual([entry["anchor"] for entry in decision["cells"]], ["B0", "C0"])
+        self.assertEqual(decision["trigger_cell"], ("D01",))
+
+    def test_fusion_strategy_selects_one_only_after_all_three_screening_cells(self):
+        fusion = ("F03", "F04", "F05")
+        self.rows(fusion, "C2", ((74, 74), (76, 76), None), "T04")
+        self.assertEqual(self.decide(fusion)[1]["state"], "incomplete_study")
+        self.assertEqual(promotion_dependencies(fusion), {"F03", "F04", "F05", "T04"})
+        self.rows(fusion, "C2", ((74, 74), (76, 76), (73, 73)), "T04")
+        picked, decision = self.decide(fusion)
+        self.assertEqual(picked, ["F04-e40"])
+        self.assertEqual(decision["ids"], fusion)
+        self.assertEqual(decision["promoted_ids"], ("F04",))
+        self.assertEqual([row["delta_pp"] for row in decision["cells"]], [4, 6, 3])
+
+    def test_single_unsupported_aggregate_cannot_trigger_promotion(self):
+        pair = ("F01", "F02")
+        self.rows(pair, "B0", ((50,), (55,)), "T01", (70,))
+        picked, decision = self.decide(pair)
+        self.assertFalse(picked)
+        self.assertEqual(decision["state"], "uncorroborated")
+        self.assertEqual(decision["delta_pp"], 5)
+
+    def test_multiple_endpoints_can_corroborate_a_single_class_signal(self):
+        pair = ("F01", "F02")
+        cells = self.rows(pair, "B0", ((50,), (55,)), "T01", (70,))
+        manifest = save(self.root / "external_dev" / "manifest.json",
+                        {"test_classes": "classes.json", "ignore_label": 255,
+                         "val": [{"sample_id": "v01"}]})
+        save(manifest.parent / "classes.json", CLASSES)
+        digest = sha256(manifest.read_bytes()).hexdigest()
+        for name, score in zip(pair, (60, 50), strict=True):
+            external = {**cells[name], "manifest": digest,
+                        "sample_ids_sha256": sha256(b"v01\n").hexdigest(),
+                        "images": 1, "eval_samples": None, "eval_sample_seed": None,
+                        "confusion_matrix": report(name, (score,))["confusion_matrix"]}
+            save(self.root / name / "external" / digest[:16] / name / "eval" / "report.json", external)
+        picked, decision = self.decide(pair, external_manifests=[manifest])
+        self.assertEqual(picked, ["F01-e40", "F02-e40"])
+        self.assertEqual(decision["evidence"][-1]["support"]["kind"], "endpoint_tradeoff")
+        self.assertEqual(decision["trigger"], "external_dev_miou")
+
+    def test_duplicate_external_panels_do_not_count_twice(self):
+        pair = ("F01", "F02")
+        cells = self.rows(pair, "B0", ((50,), (50,)), "T01", (70,))
+        manifests = []
+        for tag in (1, 2):
+            manifest = save(self.root / "external_dev" / f"manifest-{tag}.json",
+                            {"test_classes": "classes.json", "ignore_label": 255,
+                             "val": [{"sample_id": "v01"}], "copy": tag})
+            manifests.append(manifest)
+            save(manifest.parent / "classes.json", CLASSES)
+            digest = sha256(manifest.read_bytes()).hexdigest()
+            for name, score in zip(pair, (60, 50), strict=True):
+                external = {**cells[name], "manifest": digest,
+                            "sample_ids_sha256": sha256(b"v01\n").hexdigest(),
+                            "images": 1, "eval_samples": None, "eval_sample_seed": None,
+                            "confusion_matrix": report(name, (score,))["confusion_matrix"]}
+                save(self.root / name / "external" / digest[:16] / name / "eval" / "report.json", external)
+        picked, decision = self.decide(pair, external_manifests=manifests)
+        self.assertFalse(picked)
+        self.assertEqual(decision["state"], "uncorroborated")
+        self.assertEqual([row["state"] for row in decision["evidence"][-2:]], ["matched", "matched"])
+
+    def test_reissued_anchor_external_evidence_is_read_from_history(self):
+        name = "F06"
+        cells = self.rows((name,), "C2", ((70, 70),), "T04")
+        anchor = report("C2", (70, 70))
+        manifest = save(self.root / "external_dev" / "manifest.json",
+                        {"test_classes": "classes.json", "ignore_label": 255,
+                         "val": [{"sample_id": "v01"}]})
+        save(manifest.parent / "classes.json", CLASSES)
+        digest = sha256(manifest.read_bytes()).hexdigest()
+        sample_hash = sha256(b"v01\n").hexdigest()
+        manual_root = self.root / "reissued"
+        suffix = Path(digest[:16]) / "C2" / "eval" / "report.json"
+        eval_meta = {"manifest": digest, "sample_ids_sha256": sample_hash, "images": 1,
+                     "eval_samples": None, "eval_sample_seed": None}
+        save(manual_root / suffix, {**anchor, **eval_meta})
+        save(self.root / name / "external" / suffix, {
+            **cells[name], **eval_meta, "confusion_matrix": report("C2", (60, 60))["confusion_matrix"]})
+        self.assertEqual(self.decide([name], external_manifests=[manifest])[1]["state"], "below_threshold")
+        picked, decision = self.decide([name], external_manifests=[manifest], historical_evidence_root=manual_root)
+        self.assertEqual(picked, ["F06-e40"])
+        self.assertEqual(decision["trigger"], "external_dev_miou")
+
     def test_shared_gain_cannot_justify_an_early_late_comparison(self):
         pair = ("F01", "F02")
-        self.rows(pair, "B0", ((75,), (75,)), "T01")
+        self.rows(pair, "B0", ((75, 75), (75, 75)), "T01")
         picked, decision = self.decide(pair)
         self.assertFalse(picked)
         self.assertEqual(decision["state"], "below_threshold")
@@ -86,19 +194,19 @@ class PromotionTest(unittest.TestCase):
 
     def test_large_negative_performance_can_leave_a_meaningful_contrast(self):
         pair = ("F01", "F02")
-        self.rows(pair, "B0", ((50,), (55,)), "T01")
+        self.rows(pair, "B0", ((50, 50), (55, 55)), "T01")
         self.assertEqual(self.decide(pair, 1)[1]["state"], "budget")
         picked, decision = self.decide(pair)
         self.assertEqual(picked, ["F01-e40", "F02-e40"])
         self.assertEqual(decision["delta_pp"], 5)
         self.assertEqual(decision["priority_pp"], 5)
         self.assertEqual(decision["evidence"][0]["baseline_deltas_pp"], {"F01": -20, "F02": -15})
-        self.rows(pair, "B0", ((55,), (50,)), "T01")
+        self.rows(pair, "B0", ((55, 55), (50, 50)), "T01")
         self.assertEqual(self.decide(pair)[1]["delta_pp"], -5)
 
     def test_patch_and_region_controls_cannot_be_split(self):
         pair = ("F08", "F09")
-        self.rows(pair, "C2", (None, (75,)), "T04")
+        self.rows(pair, "C2", (None, (75, 75)), "T04")
         picked, decision = self.decide(pair)
         self.assertFalse(picked)
         self.assertEqual(decision["state"], "missing_reports")
@@ -106,13 +214,13 @@ class PromotionTest(unittest.TestCase):
         self.assertEqual(promotion_dependencies(["F09"]), set())
         self.assertEqual(promotion_dependencies(pair), {"F08", "F09", "T04"})
 
-        self.rows(pair, "C2", ((60,), (75,)), "T04")
+        self.rows(pair, "C2", ((60, 60), (75, 75)), "T04")
         self.assertEqual(self.decide(pair, 1)[1]["state"], "budget")
         self.assertEqual(self.decide(pair)[0], ["F08-e40", "F09-e40"])
 
     def test_reverse_alignment_contrast_keeps_patch_pair_coherent(self):
         pair = ("F08", "F09")
-        self.rows(pair, "C2", ((60,), (60,)), "T04")
+        self.rows(pair, "C2", ((60, 60), (60, 60)), "T04")
         picked, decision = self.decide(pair)
         self.assertEqual(picked, ["F08-e40", "F09-e40"])
         self.assertEqual(decision["delta_pp"], 0)
@@ -121,10 +229,10 @@ class PromotionTest(unittest.TestCase):
 
     def test_short_factorial_interaction_can_justify_the_missing_cells(self):
         pair = ("E01", "E02")
-        self.rows(pair, "B0", ((75,), (75,)), "T01")
-        save(report_path(self.root, "T03", "C1", "eval"), report("C1", (80,), 40))
+        self.rows(pair, "B0", ((75, 75), (75, 75)), "T01")
+        save(report_path(self.root, "T03", "C1", "eval"), report("C1", (80, 80), 40))
         short_c1 = self.reference / "C1" / "dev_epoch_015" / "report.json"
-        row = report("C1", (90,))
+        row = report("C1", (90, 90))
         self.assertFalse(self.decide(pair)[0])
         save(short_c1, {**row, "sample_ids_sha256": "not-matched"})
         self.assertFalse(self.decide(pair)[0])
@@ -147,7 +255,7 @@ class PromotionTest(unittest.TestCase):
 
     def test_external_development_requires_bound_checkpoints_and_matched_samples(self):
         pair = ("F01", "F02")
-        cells = self.rows(pair, "B0", ((75,), (75,)), "T01")
+        cells = self.rows(pair, "B0", ((75, 75), (75, 75)), "T01")
         manifest = save(self.root / "external_dev" / "manifest.json",
                         {"test_classes": "classes.json", "ignore_label": 255,
                          "val": [{"sample_id": "v01"}]})
@@ -157,7 +265,7 @@ class PromotionTest(unittest.TestCase):
             external = {**cells[name],
                         "manifest": digest, "sample_ids_sha256": sha256(b"v01\n").hexdigest(),
                         "images": 1, "eval_samples": None, "eval_sample_seed": None,
-                        "confusion_matrix": report(name, (score,))["confusion_matrix"]}
+                        "confusion_matrix": report(name, (score, score))["confusion_matrix"]}
             path = self.root / name / "external" / digest[:16] / name / "eval" / "report.json"
             save(path, external)
         self.assertEqual(self.decide(pair)[1]["state"], "below_threshold")

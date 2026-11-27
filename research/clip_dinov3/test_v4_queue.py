@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from prepare_isaid import CLASSES
-from run_v4_queue import (EXTRA, FIXED, RESERVE, Run, dev_result, extra_jobs, launch_phase,
+from run_v4_queue import (EXTRA, FIXED, GIB, RESERVE, Run, dev_result, extra_jobs, launch_phase,
                           optional_external_manifest_paths, promotions, resolve_gpus, resolve_promotions, run_job, run_queue)
 
 
@@ -32,7 +32,8 @@ def report(path, score, sample_hash="samples", epoch=15, *, legacy=False, batch=
         training["patch_to_text_loss_fraction"] = .5
     full = path.parent.name == "eval"
     matrix = [[0] * len(CLASSES) for _ in CLASSES]
-    matrix[0][:2] = [score, 100 - score]
+    matrix[0][0], matrix[0][2] = score, 100 - score
+    matrix[1][1], matrix[1][2] = score, 100 - score
     data = {**training,
             "checkpoint_steps": steps, "checkpoint_epoch": epoch, "checkpoint_kind": "evaluation_only",
             "checkpoint_train_manifest": "manifest", "sample_ids_sha256": sample_hash,
@@ -86,21 +87,28 @@ class QueueTest(unittest.TestCase):
         with TemporaryDirectory() as folder:
             root = Path(folder)
             refs = root / "reference"
-            report(refs / "B0/dev_epoch_015/report.json", 10, legacy=True)
-            candidate = root / "D01/main/D01/dev_epoch_015/report.json"
-            long_anchor = root / "T01/main/B0/eval/report.json"
+            report(refs / "C2/dev_epoch_015/report.json", 10, legacy=True)
+            candidate = root / "F06/main/C2/dev_epoch_015/report.json"
+            long_anchor = root / "T04/main/C2/eval/report.json"
+
+            def candidate_report(**kwargs):
+                report(candidate, 12, **kwargs)
+                data = json.loads(candidate.read_text())
+                data["alignment_weight"] = 0.
+                data["checkpoint_training"]["alignment_weight"] = 0.
+                candidate.write_text(json.dumps(data))
 
             def decision():
-                selected, decisions = promotions(root, refs, 1, 2, ["D01"])
+                selected, decisions = promotions(root, refs, 1, 2, ["F06"])
                 return selected, decisions[0]["state"]
 
             report(long_anchor, 10, epoch=40)
             for mismatch in ({"batch": 12}, {"dino": "different"}):
-                report(candidate, 12, **mismatch)
+                candidate_report(**mismatch)
                 self.assertEqual(decision(), ([], "protocol_mismatch"))
-            report(candidate, 12, lr=.1)
+            candidate_report(lr=.1)
             self.assertEqual(decision(), ([], "invalid_report"))
-            report(candidate, 12)
+            candidate_report()
             for mismatch in ({"batch": 12}, {"dino": "different"}, {"lr": .1}):
                 report(long_anchor, 10, epoch=40, **mismatch)
                 self.assertEqual(decision(), ([], "invalid_long_anchor"))
@@ -207,6 +215,78 @@ class QueueTest(unittest.TestCase):
             summary = json.loads((args.output / "queue_summary.json").read_text())
             self.assertEqual(summary[reserve.id]["category"], "reserve")
 
+    def test_preflight_uses_both_devices_and_never_starts_main(self):
+        with TemporaryDirectory() as folder:
+            args = SimpleNamespace(output=Path(folder), gpu=["a", "b"], manifest="manifest",
+                                   clip_weights="clip", dino_weights="dino", batch_size=24, retries=0,
+                                   preflight_only=True, min_free_gib=20.)
+            first, second = Event(), Event()
+
+            def launch(command, env, log, stage_path, stage, retries):
+                self.assertEqual((command[2], command[-1], stage["phase"]), ("preflight", "24", "preflight"))
+                self.assertEqual(env["CSERIES_MIN_FREE_BYTES"], str(20 * GIB))
+                if env["CUDA_VISIBLE_DEVICES"] == "a":
+                    first.set()
+                    self.assertTrue(second.wait(4))
+                    return False, [{"retryable": False}]
+                self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "b")
+                second.set()
+                self.assertTrue(first.wait(4))
+                return True, []
+
+            runs = (EXTRA["resolution"][0], FIXED[0])
+            with patch("run_v4_queue.disk_usage", return_value=SimpleNamespace(free=32 * GIB)):
+                with patch("run_v4_queue.launch_phase", side_effect=launch) as invoke:
+                    results = run_queue(runs, args)
+            self.assertEqual(invoke.call_count, 2)
+            self.assertEqual(results[runs[0].id]["state"], "failed")
+            self.assertEqual(results[runs[1].id]["state"], "complete")
+            self.assertTrue((args.output / "queue_preflight_summary.json").exists())
+            self.assertFalse((args.output / "queue_summary.json").exists())
+
+    def test_disk_floor_records_blocked_admission_then_allows_resume(self):
+        with TemporaryDirectory() as folder:
+            args = SimpleNamespace(output=Path(folder), gpu=["a", "b"], min_free_gib=20.)
+            runs = FIXED[:2]
+            with patch("run_v4_queue.run_task", return_value={"state": "complete"}) as run:
+                with patch("run_v4_queue.disk_usage", return_value=SimpleNamespace(free=19 * GIB)):
+                    results = run_queue(runs, args)
+                self.assertFalse(run.called)
+                for item in results.values():
+                    self.assertEqual(item["reason"], "disk_low_watermark")
+                live = json.loads((args.output / "queue_live.json").read_text())
+                self.assertTrue(live["admission_paused"])
+                self.assertEqual(live["disk"]["min_free_bytes"], 20 * GIB)
+                self.assertEqual(live["ready"], [run.id for run in runs])
+                with patch("run_v4_queue.disk_usage", return_value=SimpleNamespace(free=21 * GIB)):
+                    results = run_queue(runs, args)
+                self.assertEqual(run.call_count, 2)
+                self.assertTrue(all(item["state"] == "complete" for item in results.values()))
+                live = json.loads((args.output / "queue_live.json").read_text())
+                self.assertFalse(live["admission_paused"])
+
+    def test_history_interleaves_with_training_on_two_devices(self):
+        with TemporaryDirectory() as folder:
+            histories = [SimpleNamespace(id=f"HIST-{variant}") for variant in ("C0", "B0")]
+            args = SimpleNamespace(output=Path(folder), gpu=["a", "b"], history_runs=histories)
+            starting = Event()
+            training = FIXED[0]
+
+            def execute(task, gpu, options):
+                if task.category == "fixed":
+                    self.assertEqual(gpu, "b")
+                    starting.set()
+                if task.id == histories[0].id:
+                    self.assertEqual(gpu, "a")
+                    if not starting.wait(4):
+                        raise RuntimeError("History tasks displaced both training lanes")
+                return {"state": "complete"}
+
+            with patch("run_v4_queue.run_task", side_effect=execute):
+                results = run_queue((training,), args)
+            self.assertEqual(len(results), 3)
+            self.assertTrue(all(item["state"] == "complete" for item in results.values()))
+
     def test_optional_diagnostic_depends_only_on_its_anchor(self):
         with TemporaryDirectory() as folder:
             args = SimpleNamespace(output=Path(folder), gpu=["a", "b"], diagnostics=True)
@@ -247,6 +327,23 @@ class QueueTest(unittest.TestCase):
                     self.assertEqual(delay.call_count, expected - 1)
                     self.assertEqual(failures[0]["retryable"], expected == 2)
                     self.assertEqual(json.loads((root / "stage.json").read_text())["attempt"], expected)
+
+    def test_retry_does_not_relaunch_below_disk_floor(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            env = {**os.environ, "CSERIES_MIN_FREE_BYTES": str(20 * GIB)}
+            with patch("run_v4_queue.disk_usage", side_effect=[
+                SimpleNamespace(free=21 * GIB), SimpleNamespace(free=19 * GIB),
+            ]):
+                with patch("run_v4_queue.sleep"):
+                    done, failures = launch_phase(
+                        [sys.executable, "-c", "raise SystemExit(75)"], env,
+                        root / "log.txt", root / "stage.json", {"phase": "main"}, retries=1,
+                    )
+            self.assertFalse(done)
+            self.assertEqual((failures[0]["returncode"], failures[-1]["reason"]), (75, "disk_low_watermark"))
+            self.assertEqual((root / "log.txt").read_text().count("[queue]"), 1)
+            self.assertEqual(json.loads((root / "stage.json").read_text())["phase"], "paused_disk")
 
     def test_external_stage_failure_does_not_fail_source_training(self):
         with TemporaryDirectory() as folder:
@@ -300,9 +397,15 @@ class QueueTest(unittest.TestCase):
                 data["config"].update(fusion="context", region_mode="component")
                 data["alignment_weight"] = .2
                 path.write_text(json.dumps(data))
-            selected, decisions = promotions(root, refs, 1, 2)
+            for variant, fusion in (("F04", "learned"), ("F05", "separate")):
+                path = root / variant / "main/C2/dev_epoch_015/report.json"
+                report(path, 13)
+                data = json.loads(path.read_text())
+                data["config"]["fusion"] = data["checkpoint_training"]["config"]["fusion"] = fusion
+                path.write_text(json.dumps(data))
+            selected, decisions = promotions(root, refs, 1, 2, ["F03", "F04", "F05"])
             self.assertFalse(selected)
-            self.assertEqual(next(d for d in decisions if d["ids"] == ("F03",))["state"], "invalid_report")
+            self.assertEqual(decisions[0]["cells"][0]["state"], "invalid_report")
 
     def test_f08_promotion_requires_correct_forward_weight(self):
         with TemporaryDirectory() as folder:

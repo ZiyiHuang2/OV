@@ -4,7 +4,9 @@ from dataclasses import asdict
 from hashlib import sha256
 import json
 import math
+import os
 from pathlib import Path
+from shutil import disk_usage
 from string import Formatter
 from time import perf_counter
 
@@ -151,6 +153,7 @@ def train(args, model, data, meta, state):
     audit = progress['audit']
     frozen = [(p, p._version) for name, p in model.named_parameters() if not name.startswith('core.')]
     dev_epochs = development_epochs(args.epochs, getattr(args, 'track_development', False))
+    min_free_bytes = int(os.environ.get('CSERIES_MIN_FREE_BYTES', '0'))
     for epoch in range(start_epoch, args.epochs):
         order = data_order(data, args.seed, epoch)
         cursor = start_cursor if epoch == start_epoch else 0
@@ -199,8 +202,13 @@ def train(args, model, data, meta, state):
                 audit['first_train_ids'] = list(ids)
             if steps == 1 or steps % 100 == 0:
                 print(f'step={steps} epoch={epoch+1} lr={lr:.8g} loss={values[0]:.6f} seg={values[1]:.6f} align={values[2]:.6f} pseudo={values[3]:.6f} aux={values[4]:.6f} preclip_norm={grad_norm:.6f}', flush=True)
-            if steps % args.save_every == 0 or (args.max_steps and steps >= args.max_steps):
+            low_disk = (min_free_bytes > 0 and (steps % 100 == 0 or cursor == len(order))
+                        and disk_usage(args.output).free < min_free_bytes)
+            if low_disk or steps % args.save_every == 0 or (args.max_steps and steps >= args.max_steps):
                 save(args.output / 'state.pt', model, opt, meta, epoch, cursor, steps, seen, progress)
+            if low_disk:
+                print(f'Disk low-water pause at step {steps}; rolling state saved', flush=True)
+                raise SystemExit(75)
             if args.max_steps and steps >= args.max_steps:
                 break
         if cursor == len(order):

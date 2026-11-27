@@ -95,7 +95,7 @@ bash run_isaid_suite.sh main "$manifest" "$clip" "$dino" "$long_output" 24
 
 需要两张卡时，将 `CSERIES_GPU_IDS` 设为逗号分隔的两个 GPU UUID。`CSERIES_UNATTENDED=1` 下，单组失败后该组保留日志与状态文件，同队列后续模型继续。修复故障后用相同命令重新进入，已完成的组复用报告，中断的训练从最近兼容的 `state.pt` 恢复。40 轮使用独立的优化器调度，从原始初始化启动。
 
-40 轮训练结束后，统一评估每两个 epoch 的轻量导出，以及第 15 轮，写入固定 512 图开发集曲线。保留第 15、30、40 轮和开发集最佳导出。默认按开发集 GT 出现类别的 mIoU 选最佳，留类按相同口径的 seen/held 调和均值选最佳，同分保留较早的 checkpoint。最终固定轮数的完整 val 单独报告，像素交叉熵按验证词表和非忽略像素计算。开发子集取自同一个 val，按其选出的最佳权重只用于开发诊断。设置审计后的 `EXTERNAL_MANIFEST` 再用相同配置运行 `external`，可评估长训的第 15、30、40 轮。`KEEP_FINAL_STATE=0` 可显式清理已完成任务的恢复状态。默认保留最后一个 `state.pt`，其中包含优化器和 RNG 状态。同一个训练时程内可以精确恢复，40 轮对照用独立的调度从初始权重开始。
+40 轮训练结束后，统一评估每两个 epoch 的轻量导出，以及第 15 轮，写入固定 512 图开发集曲线。保留第 15、30、40 轮和开发集最佳导出，第 15、30、40 轮均另跑完整 iSAID 验证。留类任务的三个完整验证点都报告 seen、held 与 hIoU。默认按开发集 GT 出现类别的 mIoU 选最佳，留类按相同口径的 seen/held 调和均值选最佳，同分保留较早的 checkpoint。最终固定轮数的完整 val 单独报告，像素交叉熵按验证词表和非忽略像素计算。开发子集取自同一个 val，按其选出的最佳权重只用于开发诊断。设置审计后的 `EXTERNAL_MANIFEST` 再用相同配置运行 `external`，可评估长训的第 15、30、40 轮。`KEEP_FINAL_STATE=0` 可显式清理已完成任务的恢复状态。默认保留最后一个 `state.pt`，其中包含优化器和 RNG 状态。同一个训练时程内可以精确恢复，40 轮对照用独立的调度从初始权重开始。
 
 补 C1 的两格匹配消融时，设置 `CSERIES_VARIANTS=E01,E02`。E01 使用多层语义残差和双线性上采样，E02 使用末层语义种子和 C1 的引导解码。复用历史 B0/C1 结果时，使用全词表、batch 24、15 轮、seed 42 的同一 iSAID 清单和权重版本。[四格对照与依据](C_SERIES_DESIGN.md#c1-factorial-controls)
 
@@ -111,9 +111,34 @@ python run_v4_queue.py --execute --manifest "$manifest" --clip-weights "$clip" \
 
 V4 训练每两轮导出一次开发集快照，另外保留第 5、10、15 轮计划中的评估点。组内训练完成后统一评估固定 512 图并记录交叉熵与 mIoU。默认保留最终 `state.pt`，需要节约存储时可显式传入 `--discard-final-state`。`--retries` 控制已识别瞬时故障的额外尝试次数，默认 1。缺失或无效的可选外域清单记录在 `external_manifest_status.json`，源域继续运行。`queue_live.json` 记录实时 GPU、阶段、步数和已就绪训练的粗略 ETA。尚无吞吐样本或依赖还未就绪的任务不计入 ETA。
 
-`--promote-min-delta` 和 `--reference-root` 启用最多 11 组 40 轮晋级，参考目录指向历史 15 轮实验的 `main`。先核对匹配的 15 轮结果、开发子集、权重及对应的 40 轮基线。F01/F02、E01/E02 和 F08/F09 需要成对具备结果与名额。证据记录直接对照的有符号百分点差异，按绝对值门槛保留值得复核的负结果。`--promotion-class-groups` 传入预先登记的类别分组。`--promotion-external-manifest` 仅登记用于晋级的外域开发集，同时须在 `--external-manifest` 中列出。其他外域结果只用于报告。H1 匹配结果可作为补充依据。名额有限时，达到门槛的外域或留类证据优先于仅有源域差异的组。结果缺失或口径不符的轴均记录原因。重启从 `promotion_plan.json` 复用已确定的分组。
+`--promote-min-delta` 和 `--reference-root` 启用最多 11 组 40 轮晋级，参考目录指向历史 15 轮实验的 `main`。先核对匹配的 15 轮结果、开发子集、权重及对应的 40 轮基线。D01/D02、F01/F02、E01/E02 和 F08/F09 需要成对具备结果与名额。D01/D02 分别核验 B0/C0 的短训与长训锚点。F03–F05 须三组齐全，最多晋级一组。证据记录直接对照的有符号百分点差异，按绝对值门槛保留值得复核的负结果。晋级信号需要同一对照的两个同向匹配评价域、预登记且有标签支持的类别组，或同一评价域至少两个有 GT 的类别支持差异方向。这是复验选择规则。`--promotion-class-groups` 传入预先登记的类别分组。`--promotion-external-manifest` 仅登记用于晋级的外域开发集，同时须在 `--external-manifest` 中列出。其他外域结果只用于报告。H1 匹配结果可作为补充依据。名额有限时，达到门槛的外域或留类证据优先于仅有源域差异的组。结果缺失或口径不符的轴均记录原因。重启从 `promotion_plan.json` 复用已确定的分组。
 
 `--diagnostics` 在 T01/B0 和 T03/C1 完成后，为各自终轮权重安排下列 14 个推理对照。区域聚类、额外基线资产和大词表筛选尚未接入这一自动诊断队列。69 组训练上限中仍有 9 个进阶臂需要确定具体权重与匹配协议，涵盖 LoRA、视觉末层微调、骨干替换、编码器内部交互和语义保持。
+
+### 服务器前检与完整配置
+
+```bash
+python run_v4_queue.py --execute --preflight-only \
+  --manifest "$manifest" --clip-weights "$clip" --dino-weights "$dino" \
+  --output "$acceptance_output" --gpu "$gpu_a" --gpu "$gpu_b" --batch-size 24 \
+  --ids H10 D01 D02 E01 E02 F01 F02 F03 F04 F05 F06 F07 F08 F09
+```
+
+前检会审计全量 iSAID，再在每个验证任务中训练三个 batch 并评估八张图。它只写前检状态。`--min-free-gib` 默认 20，调度器在启动、分配、阶段切换和重试前检查空间。训练每 100 步及轮末检查。触及低水位时先保存滚动状态，释放空间后用同一命令恢复。
+
+加齐当前已实现的附加队列时使用下列参数。`reference_root` 指向历史 E15 的 `main`，`loveda_val` 和 `dlrsd_val` 指向已审计的发布验证划分。单独执行已有权重评价时，将 `--history` 换成 `--history-only` 并省略训练附加参数。
+
+```bash
+python run_v4_queue.py --execute \
+  --manifest "$manifest" --clip-weights "$clip" --dino-weights "$dino" \
+  --output "$queue_output" --gpu "$gpu_a" --gpu "$gpu_b" --batch-size 24 \
+  --reference-root "$reference_root" --history \
+  --external-manifest "$loveda_val" --external-manifest "$dlrsd_val" \
+  --promote-min-delta "$promotion_min_delta" --promotion-limit 11 \
+  --extra resolution --extra relations --diagnostics --min-free-gib 20
+```
+
+`--history` 将密集 CLIP/C0 和五组已有权重的外域评价交给空闲 GPU。输出保存在当前队列的 `history/`，历史目录只读。逐类 TP、FP、FN 和主要混淆来源写入 `class_errors.json`。只有用于调参的预登记外域开发集才追加 `--promotion-external-manifest`，上述两份正式验证划分默认用于结果报告。
 
 ## 使用已有权重做推理对照
 
