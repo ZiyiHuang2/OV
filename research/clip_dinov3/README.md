@@ -73,3 +73,25 @@ python paired_latency.py --manifest "$manifest" --clip-weights "$clip" --dino-we
 ```
 
 CLIP-only 对照的视觉前向 batch 为 32，每 8 张更新一次投影。它在 CPU 重放双分支的初始化以重建数据顺序，优化器只接收 CLIP 特征和标签。评估 `report.json` 包含样本顺序摘要、混淆矩阵、逐类 IoU、GPU 耗时和峰值显存。两个训练检查点均只保存各自的投影层和元数据。
+
+## 留类与 40 轮对照
+
+从 `research/clip_dinov3` 运行下列命令。每个划分、seed、训练预算使用自己的输出目录，且前检与训练使用相同配置。留类入口接收已核验的原始完整 iSAID 清单，前检在输出目录中生成留类清单与像素审计。训练使用 12 类，源域验证用完整 15 类。H1 留出 `storage tank`、`tennis court`、`bridge`，H2 留出 `plane`、`basketball court`、`roundabout`。
+
+```bash
+export CSERIES_HELD_SPLIT=H1 CSERIES_SEED=42 CSERIES_EPOCHS=15
+export CSERIES_VARIANTS=C0,B0 CSERIES_UNATTENDED=1
+bash run_isaid_suite.sh preflight "$manifest" "$clip" "$dino" "$held_output" 24
+bash run_isaid_suite.sh main "$manifest" "$clip" "$dino" "$held_output" 24
+
+unset CSERIES_HELD_SPLIT
+export CSERIES_VARIANTS=B0,C1 CSERIES_EPOCHS=40
+bash run_isaid_suite.sh preflight "$manifest" "$clip" "$dino" "$long_output" 24
+bash run_isaid_suite.sh main "$manifest" "$clip" "$dino" "$long_output" 24
+```
+
+需要两张卡时，将 `CSERIES_GPU_IDS` 设为逗号分隔的两个 GPU UUID。`CSERIES_UNATTENDED=1` 下，单组失败后该组保留日志与状态文件，同队列后续模型继续。修复故障后用相同命令重新进入，已完成的组复用报告，中断的训练从最近兼容的 `state.pt` 恢复。40 轮使用独立的优化器调度，从原始初始化启动。
+
+40 轮训练结束后，统一评估每两个 epoch 的轻量导出，以及第 15 轮，写入固定 512 图开发集曲线。保留第 15、30、40 轮和开发集最佳导出。默认按开发集 GT 出现类别的 mIoU 选最佳，留类按相同口径的 seen/held 调和均值选最佳，同分保留较早的 checkpoint。最终完整 val 独立报告，像素交叉熵按验证词表和非忽略像素计算。设置审计后的 `EXTERNAL_MANIFEST` 再用相同配置运行 `external`，可评估长训的第 15、30、40 轮。`KEEP_FINAL_STATE=1` 时保留已完成组的最后恢复状态。
+
+补 C1 的两格匹配消融时，设置 `CSERIES_VARIANTS=E01,E02`。E01 使用多层语义残差和双线性上采样，E02 使用末层语义种子和 C1 的引导解码。复用历史 B0/C1 结果时，使用全词表、batch 24、15 轮、seed 42 的同一 iSAID 清单和权重版本。[四格对照与依据](C_SERIES_DESIGN.md#c1-factorial-controls)

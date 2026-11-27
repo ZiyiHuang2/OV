@@ -12,6 +12,9 @@ from torch import nn
 from torch.nn import functional as F
 
 
+VARIANTS = ("C0", "B0", "D0", "C1", "C2", "C3", "C4", "C5", "C6", "E01", "E02")
+
+
 @dataclass(frozen=True)
 class Config:
     variant: str
@@ -33,7 +36,7 @@ class Config:
     decoder: str = "guided"
 
     def __post_init__(self):
-        if self.variant not in ("C0", "B0", "D0", "C1", "C2", "C3", "C4", "C5", "C6"):
+        if self.variant not in VARIANTS:
             raise ValueError("Unknown variant")
         if self.affinity not in ("visual", "semantic", "dual") or self.fusion not in ("context", "separate", "learned", "mean") or self.decoder not in ("guided", "shared"):
             raise ValueError("Unknown interaction mode")
@@ -45,6 +48,20 @@ class Config:
             raise ValueError("neighbors and topk must be positive")
         if (self.rs or self.pixel) and self.variant not in ("C4", "C5", "C6"):
             raise ValueError("Domain switches require C4/C5/C6")
+        if self.variant in ("E01", "E02") and self.decoder != "guided":
+            raise ValueError("C1 factorial controls require the default decoder setting")
+
+    @property
+    def concat_seed(self):
+        return self.variant in ("B0", "C1", "E01", "E02")
+
+    @property
+    def multilayer_residual(self):
+        return self.variant in ("C1", "E01")
+
+    @property
+    def has_decoder(self):
+        return self.variant not in ("C0", "B0", "E01")
 
     @property
     def dual_cost(self):
@@ -444,8 +461,8 @@ class CombinationCore(nn.Module):
     def __init__(self, cfg, train_classes, clip_dim=512, dino_dim=768, clip_width=768, clip_layers=12, dino_layers=4):
         super().__init__()
         self.cfg = cfg
-        self.base = identity_projection(clip_dim + (dino_dim if cfg.variant in ("B0", "C1") else 0), clip_dim)
-        if cfg.variant == "C1":
+        self.base = identity_projection(clip_dim + (dino_dim if cfg.concat_seed else 0), clip_dim)
+        if cfg.multilayer_residual:
             self.clip_merge = WeightedLayers(clip_width, clip_layers, 128)
             self.dino_merge = WeightedLayers(dino_dim, dino_layers, 128)
             self.merge = nn.Sequential(nn.Linear(256, clip_dim), nn.GELU(), nn.Linear(clip_dim, clip_dim))
@@ -466,7 +483,7 @@ class CombinationCore(nn.Module):
             self.relation = RelationPropagation(cfg.affinity, cfg.neighbors, cfg.relation_source, cfg.relation_control, cfg.relation_chunk)
         if cfg.use_rs:
             self.memory = PrototypeMemory(train_classes, dino_dim)
-        if cfg.variant not in ("C0", "B0"):
+        if cfg.has_decoder:
             self.decoder = (GuidedDecoder if cfg.decoder=="guided" else SharedReconstruction)(clip_dim, clip_width, dino_dim)
         if cfg.variant == "C6":
             self.selector=CategoryRouter()
@@ -481,8 +498,8 @@ class CombinationCore(nn.Module):
             raise ValueError("Ground truth cannot enter inference")
         text = norm(text)
         native = norm(clip) @ text.T
-        z = self.base(torch.cat((clip, dino), -1) if cfg.variant in ("B0", "C1") else clip)
-        if cfg.variant == "C1":
+        z = self.base(torch.cat((clip, dino), -1) if cfg.concat_seed else clip)
+        if cfg.multilayer_residual:
             z = z + self.merge(torch.cat((self.clip_merge(clip_layers), self.dino_merge(dino_layers)), -1))
         cs = norm(z) @ text.T
         full_k = len(text)
@@ -540,16 +557,14 @@ class CombinationCore(nn.Module):
             result["unknown_count"]=(F.adaptive_avg_pool2d((status==0).float()[:,None],grid).flatten(1)>=1-1e-6).sum().detach()
             # Full coarse prediction means routed training never changes pseudo target vocabulary.
             result["pseudo_loss"]=F.kl_div(full_seed[mask].log_softmax(-1),target[mask],reduction="batchmean") if mask.any() else full_seed.sum()*0
-        if cfg.variant in ("C0", "B0"):
-            logits = map_grid(seed, grid)
-        else:
+        delta = None
+        if cfg.has_decoder:
             if len(guides) != 2:
                 raise ValueError("Two guide levels required")
             delta = self.decoder(seed, scale * native[..., keep], text, guides, grid)
-            logits = F.interpolate(map_grid(seed, grid), output_size, mode="bilinear", align_corners=False)
+        logits = F.interpolate(map_grid(seed, grid), output_size, mode="bilinear", align_corners=False)
+        if delta is not None:
             logits = logits + F.interpolate(delta, output_size, mode="bilinear", align_corners=False)
-        if cfg.variant in ("C0", "B0"):
-            logits = F.interpolate(logits, output_size, mode="bilinear", align_corners=False)
         if len(keep) != full_k:
             logits = logits.new_full((len(clip), full_k, *output_size), -1e4).index_copy(1, keep, logits)
         result["logits"], result["kept"] = logits, keep

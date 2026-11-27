@@ -11,6 +11,7 @@ import tempfile
 MOCK = """
 import argparse, json, os
 from pathlib import Path
+from isaid_protocol import development_epochs
 
 p = argparse.ArgumentParser()
 p.add_argument('mode')
@@ -20,16 +21,24 @@ p.add_argument('--variant')
 p.add_argument('--epochs', type=int)
 p.add_argument('--batch-size', type=int)
 p.add_argument('--checkpoint', type=Path)
+p.add_argument('--seed', type=int)
+p.add_argument('--eval-loss', action='store_true')
 a, _ = p.parse_known_args()
 a.output.mkdir(parents=True, exist_ok=True)
 manifest = json.loads(a.manifest.read_text())
 if a.mode == 'train':
-    stages = {5: [1, 3], 15: [5, 10]}.get(a.epochs, [])
+    stages = [e for e in development_epochs(a.epochs) if e < a.epochs]
+    if os.environ.get('FAIL_TRAIN_VARIANT') == a.variant:
+        (a.output / 'state.pt').write_text('interrupted')
+        raise SystemExit(9)
+    if a.checkpoint is not None:
+        assert a.checkpoint.read_text() == 'interrupted'
+        print('fixture resumed')
     for name in ['state', 'final'] + [f'epoch_{e:03d}' for e in stages]:
         (a.output / (name + '.pt')).write_text(name)
     report = {'config': {'variant': a.variant}, 'completed_epochs': a.epochs,
               'steps': a.epochs * 3, 'training_policy': {'epochs': a.epochs},
-              'batch_size': a.batch_size, 'gpu': os.environ.get('CUDA_VISIBLE_DEVICES')}
+              'batch_size': a.batch_size, 'seed': a.seed, 'gpu': os.environ.get('CUDA_VISIBLE_DEVICES')}
 else:
     assert a.checkpoint.is_file(), a.checkpoint
     variant = a.checkpoint.parent.parent.name
@@ -38,7 +47,11 @@ else:
     bad = os.environ.get('BAD_STAGE') == a.output.name
     report = {'config': {'variant': variant}, 'checkpoint_epoch': epoch - bad,
               'checkpoint_kind': 'evaluation_only', 'checkpoint_steps': epoch * 3,
-              'images': len(manifest['val']), 'miou_percent': 1}
+              'images': len(manifest['val']), 'miou_percent': 1,
+              'test_classes': ['mock'], 'class_iou': {'mock': 2 if epoch == 18 else 1},
+              'confusion_matrix': [[1]], 'sample_ids_sha256': 'fixture'}
+    if a.eval_loss:
+        report['mean_pixel_cross_entropy'] = 0.3
 (a.output / 'report.json').write_text(json.dumps(report))
 """
 
@@ -47,6 +60,7 @@ def verify(launcher):
     with tempfile.TemporaryDirectory(prefix="cseries-shell-test-") as tmp:
         root = Path(tmp)
         shutil.copyfile(launcher, root / "run_isaid_suite.sh")
+        shutil.copyfile(launcher.with_name("isaid_protocol.py"), root / "isaid_protocol.py")
         (root / "prepare_isaid.py").write_text("CLASSES = ['mock']\nSPLIT_SIZES = {'train': 2, 'val': 1}\n")
         (root / "run_combinations.py").write_text(MOCK)
         (root / "classes.json").write_text('["mock"]')
@@ -73,7 +87,9 @@ def verify(launcher):
         def run(phase, manifest=good, dest="run", batch=8, **env):
             result = subprocess.run(["bash", "run_isaid_suite.sh", phase, str(manifest), "clip.pt", "dino.pt", dest, str(batch)],
                                     cwd=root, env={**os.environ, "PYTHON": sys.executable, "CSERIES_EPOCHS": "5",
-                                                   "CSERIES_GPU_IDS": "", "KEEP_FINAL_STATE": "0", **env},
+                                                   "CSERIES_GPU_IDS": "", "KEEP_FINAL_STATE": "0",
+                                                   "CSERIES_VARIANTS": "", "CSERIES_SEED": "42",
+                                                   "CSERIES_HELD_SPLIT": "", "CSERIES_UNATTENDED": "0", **env},
                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             return result.returncode, result.stdout
 
@@ -133,8 +149,48 @@ def verify(launcher):
                 assert {d.name for d in model.glob("dev_epoch_*")} == {"dev_epoch_005", "dev_epoch_010", "dev_epoch_015"}
         assert "dev_epoch_010" in (run_dir / "summary.csv").read_text()
         assert (run_dir / "C6/keep_all/report.json").is_file()
+        tracked = {"CSERIES_EPOCHS": "40", "CSERIES_VARIANTS": "C0,B0",
+                   "CSERIES_SEED": "43", "CSERIES_UNATTENDED": "1"}
+        code, log = run("preflight", dest="tracked", **tracked)
+        assert not code, log
+        code, log = run("main", dest="tracked", FAIL_TRAIN_VARIANT="C0", **tracked)
+        assert code and "Failed: main/C0" in log, log
+        tracked_dir = root / "tracked/main"
+        assert (tracked_dir / "B0/eval/report.json").is_file()
+        assert (tracked_dir / "C0/train/state.pt").read_text() == "interrupted"
+        wrong_seed = {**tracked, "CSERIES_SEED": "44"}
+        code, log = run("main", dest="tracked", **wrong_seed)
+        assert code and "Protocol changed" in log, log
+        code, log = run("main", dest="tracked", **tracked)
+        assert not code and "fixture resumed" in log, log
+        for variant in ("C0", "B0"):
+            run_root = tracked_dir / variant
+            assert sorted(p.name for p in run_root.glob("train/*.pt")) == [
+                "best.pt", "epoch_015.pt", "epoch_030.pt", "final.pt"]
+            assert (run_root / "train/best.pt").read_text() == "epoch_018"
+            assert json.loads((run_root / "train/best.json").read_text())["epoch"] == 18
+            assert json.loads((run_root / "train/report.json").read_text())["seed"] == 43
+        code, log = run("main", dest="tracked", **tracked)
+        assert not code, log
+        assert "mean_pixel_cross_entropy" in (tracked_dir / "summary.csv").read_text()
+        external = root / "external.json"
+        external.write_text(json.dumps(manifest))
+        code, log = run("external", dest="tracked", EXTERNAL_MANIFEST=str(external), **tracked)
+        assert not code, log
+        external_summary, = (root / "tracked/external").glob("*/summary.csv")
+        assert "epoch_015" in external_summary.read_text() and "epoch_030" in external_summary.read_text()
+        factorial = {"CSERIES_VARIANTS": "E01,E02", "CSERIES_GPU_IDS": "gpu-a,gpu-b"}
+        code, log = run("preflight", dest="factorial", **factorial)
+        assert not code, log
+        code, log = run("main", dest="factorial", **factorial)
+        assert not code, log
+        factorial_dir = root / "factorial/main"
+        for v, gpu in (("E01", "gpu-a"), ("E02", "gpu-b")):
+            report = json.loads((factorial_dir / v / "train/report.json").read_text())
+            assert report["gpu"] == gpu
+        assert not (factorial_dir / "B0").exists()
     assert not failures, failures
-    print("PASS: data gate, checkpoint retention and recovery, and matched 15-epoch schedule on two GPU lanes")
+    print("PASS: iSAID data gate, 5/15/40-epoch schedules, recovery, failure isolation, retention and factorial selection")
 
 
 if __name__ == "__main__":

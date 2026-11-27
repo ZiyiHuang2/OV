@@ -18,6 +18,17 @@ Status: implementation candidate; CPU synthetic verification only. V1: `c93a2015
 
 D0/C2/C3/C4 form the matched factorial (interaction = C4-C2-C3+D0). C1 stays a competing route, not the factorial anchor. C5: `--no-rs`, `--no-pixel`, `--no-pseudo`. C2/C4: `--fusion mean|learned|separate|context`, `--region-mode class|component`. C3/C4: `--affinity visual|semantic|dual`, `--relation-source native|fused|joint`, `--relation-control global|conditional`, `--relation-chunk 128`. Shared decoder control: `--decoder guided|shared`. C6: `--router dual|union`, `--no-route-train`, `--topk`, same-checkpoint `--force-keep-all`. Defaults are hypotheses, not validated optimal settings. All new settings are stored in checkpoint config. Only top-k/router may be overridden at eval.
 
+### C1 factorial controls
+
+| Variant | Seed projection | Multi-layer seed residual | Upsampling |
+|---|---|---|---|
+| B0 | CLIP/DINOv3 concatenation | Off | Bilinear |
+| E01 | Same as B0 | Same as C1 | Bilinear |
+| E02 | Same as B0 | Off | Same guided decoder as C1 |
+| C1 | Same as B0 | On | Guided decoder |
+
+E01 reuses C1's layer projections and learned weights, inspired by [USE §3.2](https://arxiv.org/html/2406.05271). E02 reuses the existing [SED-inspired guided decoder](https://openaccess.thecvf.com/content/CVPR2024/html/Xie_SED_A_Simple_Encoder-Decoder_for_Open-Vocabulary_Semantic_Segmentation_CVPR_2024_paper.html), including the same two intermediate visual guide pairs as C1. Its last-layer restriction applies to the semantic seed. Both controls use the pinned [CLIP transformer](https://github.com/openai/CLIP/blob/d05afc436d78f1c48dc0dbf8e5980a9d471f35f6/clip/model.py) and [DINOv3 intermediate-layer API](https://github.com/facebookresearch/dinov3/blob/6876159a11b4df116f30f667f8c9888617df0751/dinov3/models/vision_transformer.py). Compare all four within the same data, seed, budget, and evaluator protocol.
+
 ## Tensor contracts, information responsibilities, and gradient paths
 
 - Frozen/eval CLIP and DINOv3, CLIP text encoder; one image pass per branch in normal execution. CLIP projected `[B,N,512]`, CLIP intermediate `[B,N,768]`, DINO patch `[B,N,768]` excluding storage/CLS tokens, text `[K,512]`; row-major shared 24x24 grid at 384 input. Intermediate layers share the same spatial resolution. C1 retains V1's per-layer LN, projection, learned layer weights, B0 residual and zero-initialized correction; no gratuitous additional architecture.

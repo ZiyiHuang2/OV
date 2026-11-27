@@ -16,7 +16,8 @@ from torch.nn import functional as F
 # Existing entry point sets up the pinned local CLIP and DINO dependencies.
 from run import ManifestSplit, PROMPT
 from combination_model import CSeriesSegmenter
-from combination_core import Config, segmentation_loss
+from combination_core import Config, VARIANTS, segmentation_loss
+from isaid_protocol import development_epochs
 
 
 class StatusSplit(ManifestSplit):
@@ -138,7 +139,7 @@ def train(args, model, data, meta, state):
         torch.cuda.reset_peak_memory_stats()
     audit = progress['audit']
     frozen = [(p, p._version) for name, p in model.named_parameters() if not name.startswith('core.')]
-    dev_epochs = (5, 10) if args.epochs == 15 else (1, 3)
+    dev_epochs = development_epochs(args.epochs)
     for epoch in range(start_epoch, args.epochs):
         order = data_order(data, args.seed, epoch)
         cursor = start_cursor if epoch == start_epoch else 0
@@ -237,6 +238,8 @@ def evaluate(args, model, data, meta):
         torch.cuda.synchronize(); del warm
         torch.cuda.reset_peak_memory_stats()
     times, sizes = [], []; present_classes = retained_classes = retained_pixels = total_pixels = 0
+    compute_loss = getattr(args, 'eval_loss', False)
+    loss_sum = torch.zeros((), dtype=torch.float64, device=args.device) if compute_loss else None
     seen = set(model.train_classes); sample_digest = sha256(); peak = 0
     sample_order = None
     if args.eval_samples is not None:
@@ -254,6 +257,8 @@ def evaluate(args, model, data, meta):
             times.append((perf_counter() - start) * 1000)
         keep = r['kept']; sizes.extend([len(keep)] * len(images))
         labels = labels.to(args.device); valid = labels != data.ignore_id
+        if compute_loss:
+            loss_sum += F.cross_entropy(r['logits'], labels, ignore_index=data.ignore_id, reduction='sum')
         pairs = labels[valid] * k + pred[valid]
         confusion += torch.bincount(pairs, minlength=k*k).reshape(k,k)
         for y in labels:
@@ -266,7 +271,7 @@ def evaluate(args, model, data, meta):
     iou = [100 * (intersection[i]/union[i]).item() if union[i] else None for i in range(k)]
     si = mean_for(iou, [i for i,c in enumerate(data.classes) if c in seen]); ui = mean_for(iou, [i for i,c in enumerate(data.classes) if c not in seen])
     harmonic = (2*si*ui/(si+ui) if si+ui else 0.) if si is not None and ui is not None else None
-    return {**meta, 'test_classes': data.classes, 'miou_percent': mean_for(iou, range(k)),
+    report = {**meta, 'test_classes': data.classes, 'miou_percent': mean_for(iou, range(k)),
             'seen_miou': si, 'unseen_miou': ui, 'harmonic_iou': harmonic,
             'class_iou': dict(zip(data.classes, iou)), 'confusion_matrix': confusion.tolist(),
             'sample_ids_sha256': sample_digest.hexdigest(), 'images': len(sizes),
@@ -276,12 +281,15 @@ def evaluate(args, model, data, meta):
             'ms_per_image': sum(times)/len(sizes), 'peak_cuda_mib': peak/2**20 if cuda else None,
             'force_keep_all': args.force_keep_all, 'eval_samples': args.eval_samples,
             'eval_sample_seed': args.eval_sample_seed if args.eval_samples is not None else None}
+    if compute_loss:
+        report['mean_pixel_cross_entropy'] = loss_sum.item() / total_pixels if total_pixels else None
+    return report
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('mode', choices=('train','eval'))
-    p.add_argument('--variant', choices=('C0','B0','D0','C1','C2','C3','C4','C5','C6'))
+    p.add_argument('--variant', choices=VARIANTS)
     for name in ('manifest','clip-weights','dino-weights','output','checkpoint'):
         p.add_argument('--'+name, type=Path, required=name in ('manifest','clip-weights','output'))
     p.add_argument('--device', default='cuda'); p.add_argument('--size',type=int,default=384)
@@ -292,6 +300,7 @@ def main():
     p.add_argument('--train-warmup-steps',type=int,default=300)
     p.add_argument('--min-lr-ratio',type=float,default=.1); p.add_argument('--grad-clip',type=float,default=1.)
     p.add_argument('--eval-samples',type=int); p.add_argument('--eval-sample-seed',type=int,default=42)
+    p.add_argument('--eval-loss', action='store_true', help='Report pixel cross-entropy over the evaluation vocabulary')
     p.add_argument('--weight-decay',type=float,default=.01); p.add_argument('--max-steps',type=int)
     p.add_argument('--save-every',type=int,default=500); p.add_argument('--warmup',type=int,default=30)
     p.add_argument('--audit',action='store_true'); p.add_argument('--force-keep-all',action='store_true')
@@ -317,6 +326,7 @@ def main():
     if args.batch_size<1 or args.save_every<1 or args.epochs<1 or args.alignment_weight<0 or args.aux_weight<0 or args.pseudo_weight<0 or args.pseudo_warmup<0: p.error('Invalid training settings')
     if args.lr <= 0 or args.train_warmup_steps < 0 or not 0 <= args.min_lr_ratio <= 1 or args.grad_clip < 0: p.error('Invalid optimizer policy')
     if args.eval_samples is not None and (args.mode!='eval' or args.eval_samples<1 or args.limit is not None): p.error('Use positive --eval-samples only in eval, without --limit')
+    if args.mode != 'eval' and args.eval_loss: p.error('--eval-loss is evaluation only')
     if args.mode=='eval' and not args.checkpoint: p.error('Evaluation requires checkpoint')
     if args.mode=='train' and args.force_keep_all: p.error('--force-keep-all is evaluation only; use --no-route-train for full-vocabulary training')
     torch.set_num_threads(2); torch.manual_seed(args.seed)

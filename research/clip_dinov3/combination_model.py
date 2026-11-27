@@ -29,7 +29,7 @@ class CSeriesSegmenter(DualPatchSegmenter):
         if len(blocks) != 12 or len(self.dino.blocks) != 12:
             raise ValueError('The audited C-series assumes the two specified ViT-B/16 checkpoints')
         capture = {}
-        indices = list(range(12)) if self.config.variant == 'C1' else [3, 7]
+        indices = list(range(12)) if self.config.multilayer_residual else [3, 7]
         def hook_at(i):
             def record(module, inputs, output):
                 capture[i] = output.transpose(0, 1)[:, 1:].float()
@@ -43,7 +43,7 @@ class CSeriesSegmenter(DualPatchSegmenter):
         dino_input = (rgb - self.dino_mean) / self.dino_std
         ds = tuple(x.float() for x in self.dino.get_intermediate_layers(dino_input, n=[8, 9, 10, 11], norm=True))
         d = ds[-1]
-        guides = ((capture[7], ds[2]), (capture[3], ds[0]))
+        guides = ((capture[7], ds[2]), (capture[3], ds[0])) if self.config.has_decoder else ()
         return c, d, tuple(capture[i] for i in indices), ds, guides, grid
 
     def forward(self, images, text, labels=None, ignore=255, force_keep_all=False, status=None, pseudo_enabled=True):

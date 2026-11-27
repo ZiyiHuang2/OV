@@ -15,6 +15,7 @@ import torch
 from torch.utils.data import Dataset
 from torch import nn
 from combination_core import CombinationCore, Config
+from isaid_protocol import HELD_CLASSES, development_epochs, held_identity, prepare_isaid_held
 from prepare_supervision import prepare_held, prepare_negatives
 
 
@@ -103,7 +104,7 @@ class TestProtocol(unittest.TestCase):
         self.assertTrue(all(x>=y for x,y in zip(values[2:],values[3:])))
     def test_formal_schedule(self):
         runner = read_runner()
-        for batch_size, epochs, planned_steps in ((8, 5, 11300), (24, 15, 11310)):
+        for batch_size, epochs, planned_steps in ((8, 5, 11300), (24, 15, 11310), (24, 40, 30160)):
             with self.subTest(batch_size=batch_size, epochs=epochs):
                 args = SimpleNamespace(batch_size=batch_size, epochs=epochs, lr_schedule='cosine',
                                        train_warmup_steps=300, min_lr_ratio=.1, grad_clip=1.)
@@ -112,6 +113,8 @@ class TestProtocol(unittest.TestCase):
                 self.assertEqual(policy['warmup_steps'], 300)
                 for step, lr in ((0, 1e-3/300), (299, 1e-3), (300, 1e-3), (planned_steps-1, 1e-4)):
                     self.assertAlmostEqual(runner.step_lr(1e-3, step, policy), lr)
+                if epochs == 40:
+                    self.assertGreater(runner.step_lr(1e-3, 11310 - 1, policy), 1e-4)
     def test_fifteen_epoch_checkpoints(self):
         runner = read_runner()
         data = FixtureData()
@@ -145,6 +148,27 @@ class TestProtocol(unittest.TestCase):
             with Image.open(m['train'][0]['sem_seg_file_name']) as im:self.assertEqual(np.array(im).tolist(),[[0,255,1,255],[0,255,1,255]])
             with Image.open(m['val'][0]['sem_seg_file_name']) as im:self.assertEqual(np.array(im).tolist(),[[0,1,2,255],[0,1,2,255]])
             self.assertNotIn('pixel_status_file_name',m['train'][0]);self.assertEqual(json.loads((out/'split_audit.json').read_text())['held_train_pixels_remapped_to_ignore'],2)
+    def test_held_suite_identity(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self.fixture(root)
+            labels = [*HELD_CLASSES['H1'], *HELD_CLASSES['H2'], 'ship']
+            (root / 'classes.json').write_text(json.dumps(labels))
+            codes = np.arange(7, dtype=np.uint8).reshape(1, 7)
+            for split in ('train', 'val'):
+                Image.fromarray(codes).save(root / f'{split}.png')
+            out = root / 'held_data'
+            prepare_isaid_held(source, out, 'H1')
+            manifest = out / 'manifest.json'
+            initial = held_identity(source, manifest, 'H1')
+            with self.assertRaisesRegex(ValueError, 'vocabulary'):
+                held_identity(source, manifest, 'H2')
+            self.assertEqual(development_epochs(40), tuple(sorted({15, *range(2, 40, 2)})))
+            path = out / 'masks' / '00000000.png'
+            with Image.open(path) as image:
+                self.assertEqual(np.asarray(image).tolist(), [[255, 255, 255, 0, 1, 2, 3]])
+            Image.fromarray(codes).save(path)
+            self.assertNotEqual(initial, held_identity(source, manifest, 'H1'))
     def test_negative_evidence_requires_independent_mask(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);p=self.fixture(root);e=root/'evidence.json';e.write_text(json.dumps({'t':'proof.png'}))

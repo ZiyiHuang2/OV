@@ -1,6 +1,6 @@
 import unittest
 import torch
-from combination_core import Config, CombinationCore, segmentation_loss, RelationPropagation, ContextCostFusion, CategoryRouter, pool_regions, unknown_consistency
+from combination_core import VARIANTS, Config, CombinationCore, segmentation_loss, RelationPropagation, ContextCostFusion, CategoryRouter, pool_regions, unknown_consistency
 
 class TestCore(unittest.TestCase):
     def setUp(self):
@@ -19,7 +19,7 @@ class TestCore(unittest.TestCase):
         return m(self.c, None if m.cfg.variant == 'C0' else self.d, self.t if text is None else text,
                  20., self.grid, (12,16), self.cl,self.dl,self.guides,labels=labels, **kw)
     def test_all_variants(self):
-        for v in ('C0','B0','D0','C1','C2','C3','C4','C5','C6'):
+        for v in VARIANTS:
             with self.subTest(v=v):
                 m = self.model(v); opt = torch.optim.AdamW(m.parameters(),lr=.001)
                 for _ in range(3):
@@ -38,9 +38,26 @@ class TestCore(unittest.TestCase):
                 perm=torch.randperm(7); r2=self.fwd(m,text=t[perm],force_keep_all=True)
                 torch.testing.assert_close(r2['logits'],r['logits'][:,perm],atol=2e-5,rtol=2e-5)
                 with self.assertRaises(ValueError): self.fwd(m,labels=self.y)
-    def test_initial_c1_matches_b0(self):
-        a=self.model('B0').eval(); b=self.model('C1').eval()
-        torch.testing.assert_close(self.fwd(a)['logits'],self.fwd(b)['logits'])
+    def test_c1_factorial_controls(self):
+        baseline, c1, fusion, decoder = (self.model(v).eval() for v in ('B0', 'C1', 'E01', 'E02'))
+        initial = self.fwd(baseline)['logits']
+        for model in (c1, fusion, decoder):
+            torch.testing.assert_close(self.fwd(model)['logits'], initial)
+        self.assertFalse(hasattr(fusion, 'decoder'))
+        self.assertFalse(hasattr(decoder, 'merge'))
+        with torch.no_grad():
+            c1.merge[-1].weight.normal_(std=.01)
+            for name in ('merge', 'clip_merge', 'dino_merge'):
+                getattr(fusion, name).load_state_dict(getattr(c1, name).state_dict())
+            fusion_only = self.fwd(fusion)['logits']
+            torch.testing.assert_close(fusion_only, self.fwd(c1)['logits'])
+            self.assertFalse(torch.allclose(fusion_only, initial))
+            c1.merge[-1].weight.zero_()
+            c1.decoder.out.weight.normal_(std=.01)
+            decoder.decoder.load_state_dict(c1.decoder.state_dict())
+            decoder_only = self.fwd(decoder)['logits']
+            torch.testing.assert_close(decoder_only, self.fwd(c1)['logits'])
+            self.assertFalse(torch.allclose(decoder_only, initial))
     def test_actual_grid(self):
         torch.manual_seed(2); m=CombinationCore(Config('C4'),15).eval()
         c=torch.randn(1,576,512); d=torch.randn(1,576,768); t=torch.randn(15,512)
