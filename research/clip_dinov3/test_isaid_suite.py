@@ -23,6 +23,9 @@ p.add_argument('--batch-size', type=int)
 p.add_argument('--checkpoint', type=Path)
 p.add_argument('--seed', type=int)
 p.add_argument('--eval-loss', action='store_true')
+p.add_argument('--fusion')
+p.add_argument('--region-mode')
+p.add_argument('--alignment-weight', type=float)
 a, _ = p.parse_known_args()
 a.output.mkdir(parents=True, exist_ok=True)
 manifest = json.loads(a.manifest.read_text())
@@ -38,7 +41,8 @@ if a.mode == 'train':
         (a.output / (name + '.pt')).write_text(name)
     report = {'config': {'variant': a.variant}, 'completed_epochs': a.epochs,
               'steps': a.epochs * 3, 'training_policy': {'epochs': a.epochs},
-              'batch_size': a.batch_size, 'seed': a.seed, 'gpu': os.environ.get('CUDA_VISIBLE_DEVICES')}
+              'batch_size': a.batch_size, 'seed': a.seed, 'gpu': os.environ.get('CUDA_VISIBLE_DEVICES'),
+              'fusion': a.fusion, 'region_mode': a.region_mode, 'alignment_weight': a.alignment_weight}
 else:
     assert a.checkpoint.is_file(), a.checkpoint
     variant = a.checkpoint.parent.parent.name
@@ -89,7 +93,8 @@ def verify(launcher):
                                     cwd=root, env={**os.environ, "PYTHON": sys.executable, "CSERIES_EPOCHS": "5",
                                                    "CSERIES_GPU_IDS": "", "KEEP_FINAL_STATE": "0",
                                                    "CSERIES_VARIANTS": "", "CSERIES_SEED": "42",
-                                                   "CSERIES_HELD_SPLIT": "", "CSERIES_UNATTENDED": "0", **env},
+                                                   "CSERIES_HELD_SPLIT": "", "CSERIES_UNATTENDED": "0",
+                                                   "CSERIES_SIZE": "384", "CSERIES_C2_CONTROL": "", **env},
                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             return result.returncode, result.stdout
 
@@ -189,6 +194,14 @@ def verify(launcher):
             report = json.loads((factorial_dir / v / "train/report.json").read_text())
             assert report["gpu"] == gpu
         assert not (factorial_dir / "B0").exists()
+        controls = {"CSERIES_VARIANTS": "C2", "CSERIES_C2_CONTROL": "noalign"}
+        code, log = run("preflight", dest="control", **controls)
+        assert not code, log
+        code, log = run("main", dest="control", CSERIES_VARIANTS="C2", CSERIES_C2_CONTROL="classpool")
+        assert code and "Protocol changed" in log, log
+        code, log = run("main", dest="control", **controls)
+        assert not code, log
+        assert json.loads((root / "control/main/C2/train/report.json").read_text())["alignment_weight"] == 0
     assert not failures, failures
     print("PASS: iSAID data gate, 5/15/40-epoch schedules, recovery, failure isolation, retention and factorial selection")
 

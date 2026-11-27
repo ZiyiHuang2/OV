@@ -29,6 +29,19 @@ D0/C2/C3/C4 form the matched factorial (interaction = C4-C2-C3+D0). C1 stays a c
 
 E01 reuses C1's layer projections and learned weights, inspired by [USE §3.2](https://arxiv.org/html/2406.05271). E02 reuses the existing [SED-inspired guided decoder](https://openaccess.thecvf.com/content/CVPR2024/html/Xie_SED_A_Simple_Encoder-Decoder_for_Open-Vocabulary_Semantic_Segmentation_CVPR_2024_paper.html), including the same two intermediate visual guide pairs as C1. Its last-layer restriction applies to the semantic seed. Both controls use the pinned [CLIP transformer](https://github.com/openai/CLIP/blob/d05afc436d78f1c48dc0dbf8e5980a9d471f35f6/clip/model.py) and [DINOv3 intermediate-layer API](https://github.com/facebookresearch/dinov3/blob/6876159a11b4df116f30f667f8c9888617df0751/dinov3/models/vision_transformer.py). Compare all four within the same data, seed, budget, and evaluator protocol.
 
+### Remaining fixed V4 controls
+
+| Variant | Definition | Comparison |
+|---|---|---|
+| D01 | Frozen DINOv3 visual tokens, learned 768-to-512 projection, frozen CLIP text and its logit scale | C0 and B0, with bilinear output |
+| D02 | C0 plus a zero-output-initialized 512→384→512 bias-free residual MLP | B0, both with 655,872 trainable parameters |
+| F01 | Add the two separately projected visual embeddings, then normalize and compute cosine scores | F02 |
+| F02 | Normalize the same projected embeddings independently and average their cosine scores | F01 |
+| F08 | C2 with component-to-text CE only | C2's two-direction region objective |
+| F09 | C2 with patch-to-text soft CE over the histogram of labeled pixels per patch | F08 and C2 |
+
+D01 reads normalized patch tokens through the pinned DINOv3 API and retains the CLIP text tower used by all frozen arms. D02 controls parameter count with one specific head design. F01/F02 use the same two projections, logit scale, segmentation loss and bilinear output. The comparison includes where normalization happens relative to fusion. F08/F09 retain the C2 cost mapper and decoder and change only the auxiliary objective. F09 omits ignored pixels and patches with zero labeled support. The score and region designs draw on [RSKT-Seg](https://arxiv.org/abs/2509.12040) and [OpenSeg](https://arxiv.org/abs/2112.12143) and use this project's iSAID supervision.
+
 ## Tensor contracts, information responsibilities, and gradient paths
 
 - Frozen/eval CLIP and DINOv3, CLIP text encoder; one image pass per branch in normal execution. CLIP projected `[B,N,512]`, CLIP intermediate `[B,N,768]`, DINO patch `[B,N,768]` excluding storage/CLS tokens, text `[K,512]`; row-major shared 24x24 grid at 384 input. Intermediate layers share the same spatial resolution. C1 retains V1's per-layer LN, projection, learned layer weights, B0 residual and zero-initialized correction; no gratuitous additional architecture.

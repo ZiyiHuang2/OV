@@ -95,3 +95,15 @@ bash run_isaid_suite.sh main "$manifest" "$clip" "$dino" "$long_output" 24
 40 轮训练结束后，统一评估每两个 epoch 的轻量导出，以及第 15 轮，写入固定 512 图开发集曲线。保留第 15、30、40 轮和开发集最佳导出。默认按开发集 GT 出现类别的 mIoU 选最佳，留类按相同口径的 seen/held 调和均值选最佳，同分保留较早的 checkpoint。最终完整 val 独立报告，像素交叉熵按验证词表和非忽略像素计算。设置审计后的 `EXTERNAL_MANIFEST` 再用相同配置运行 `external`，可评估长训的第 15、30、40 轮。`KEEP_FINAL_STATE=1` 时保留已完成组的最后恢复状态。
 
 补 C1 的两格匹配消融时，设置 `CSERIES_VARIANTS=E01,E02`。E01 使用多层语义残差和双线性上采样，E02 使用末层语义种子和 C1 的引导解码。复用历史 B0/C1 结果时，使用全词表、batch 24、15 轮、seed 42 的同一 iSAID 清单和权重版本。[四格对照与依据](C_SERIES_DESIGN.md#c1-factorial-controls)
+
+## V4 实验队列
+
+```bash
+python run_v4_queue.py
+python run_v4_queue.py --execute --manifest "$manifest" --clip-weights "$clip" \
+  --dino-weights "$dino" --output "$queue_output" --gpu "$gpu_a" --gpu "$gpu_b"
+```
+
+默认命令打印 33 组固定训练配置。加 `--execute` 后才分配 GPU，每组都有独立前检、训练、日志和状态。可用 `--ids` 精确选择任务，用 `--include-reserve` 加入 12 个后备。重复传入 `--external-manifest` 可在全词表模型的预定节点评估已审计外域。队列支持 `--extra resolution` 和 `--extra relations` 两个明确的附加成对实验。
+
+设置 `--promote-min-delta` 和 `--reference-root` 可启用最多 11 组同口径晋级。`reference-root` 指向历史 15 轮实验的 `main` 目录。选组使用同一固定开发集上 GT 支持的类别和预先给定的百分点阈值，并检查对应 40 轮基线已完成。F01/F02 同批晋级。各晋级组从原始初始化按 40 轮调度训练。决策写入 `promotions.json`。此次实现的可执行计划不包含需要另定版本和匹配协议的 LoRA、视觉骨干替换、编码器内部交互及语义约束进阶臂。

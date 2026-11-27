@@ -12,7 +12,8 @@ from torch import nn
 from torch.nn import functional as F
 
 
-VARIANTS = ("C0", "B0", "D0", "C1", "C2", "C3", "C4", "C5", "C6", "E01", "E02")
+VARIANTS = ("C0", "B0", "D0", "C1", "C2", "C3", "C4", "C5", "C6",
+            "D01", "D02", "E01", "E02", "F01", "F02", "F08", "F09")
 
 
 @dataclass(frozen=True)
@@ -61,11 +62,23 @@ class Config:
 
     @property
     def has_decoder(self):
-        return self.variant not in ("C0", "B0", "E01")
+        return self.variant not in ("C0", "B0", "D01", "D02", "E01", "F01", "F02")
+
+    @property
+    def uses_clip_visual(self):
+        return self.variant != "D01"
+
+    @property
+    def uses_dino(self):
+        return self.variant not in ("C0", "D02")
+
+    @property
+    def matched_fusion(self):
+        return self.variant in ("F01", "F02")
 
     @property
     def dual_cost(self):
-        return self.variant in ("C2", "C4", "C5", "C6")
+        return self.variant in ("C2", "C4", "C5", "C6", "F08", "F09")
 
     @property
     def relation(self):
@@ -201,17 +214,37 @@ class ContextCostFusion(nn.Module):
         return (self.gate(features).squeeze(-1)+self.spatial(cs,ds,grid)).sigmoid()
 
 
-def region_contrastive(regions, ids, text, scale):
+def region_contrastive(regions, ids, text, scale, reverse_direction=True):
     """Region->class CE + multi-positive class->region NCE; repeated labels aren't negatives."""
     if not len(ids):
         return text.sum() * 0
     score = scale * (norm(regions) @ norm(text).T)
     row = F.cross_entropy(score, ids)
+    if not reverse_direction:
+        return row
     present = ids.unique()
     col = score[:, present]
     positives = ids[:, None] == present[None, :]
     reverse = (col.logsumexp(0) - col.masked_fill(~positives, -torch.inf).logsumexp(0)).mean()
     return (row + reverse) / 2
+
+
+def patch_alignment_loss(logits, labels, grid, ignore):
+    """Supervise patch cost with the class histogram of annotated pixels in each patch."""
+    batch_size, patches, classes = logits.shape
+    height, width = labels.shape[-2:]
+    gh, gw = grid
+    row = torch.arange(height, device=labels.device) * gh // height
+    col = torch.arange(width, device=labels.device) * gw // width
+    patch_ids = row[:, None] * gw + col[None, :]
+    image_ids = torch.arange(batch_size, device=labels.device)[:, None, None]
+    valid = labels != ignore
+    offsets = (image_ids * patches + patch_ids) * classes
+    counts = torch.bincount((offsets + labels)[valid], minlength=batch_size * patches * classes)
+    counts = counts.reshape(batch_size, patches, classes).to(logits.dtype)
+    mass = counts.sum(-1, keepdim=True)
+    fractions = counts / mass.clamp_min(1)
+    return -(fractions * logits.log_softmax(-1)).sum() / (mass > 0).sum().clamp_min(1)
 
 
 class PrototypeMemory(nn.Module):
@@ -461,7 +494,15 @@ class CombinationCore(nn.Module):
     def __init__(self, cfg, train_classes, clip_dim=512, dino_dim=768, clip_width=768, clip_layers=12, dino_layers=4):
         super().__init__()
         self.cfg = cfg
-        self.base = identity_projection(clip_dim + (dino_dim if cfg.concat_seed else 0), clip_dim)
+        input_dim = dino_dim if not cfg.uses_clip_visual else clip_dim + (dino_dim if cfg.concat_seed else 0)
+        self.base = identity_projection(input_dim, clip_dim)
+        if cfg.variant == "D02":
+            width = dino_dim // 2
+            self.capacity = nn.Sequential(nn.Linear(clip_dim, width, bias=False), nn.GELU(),
+                                          nn.Linear(width, clip_dim, bias=False))
+            nn.init.zeros_(self.capacity[-1].weight)
+        if cfg.matched_fusion:
+            self.dino_projection = identity_projection(dino_dim, clip_dim)
         if cfg.multilayer_residual:
             self.clip_merge = WeightedLayers(clip_width, clip_layers, 128)
             self.dino_merge = WeightedLayers(dino_dim, dino_layers, 128)
@@ -490,18 +531,25 @@ class CombinationCore(nn.Module):
 
     def forward(self, clip, dino, text, scale, grid, output_size, clip_layers=(), dino_layers=(), guides=(), labels=None, ignore=255, force_keep_all=False, status=None, pseudo_enabled=True):
         cfg = self.cfg
-        if clip.shape[1] != grid[0] * grid[1] or text.ndim != 2 or len(text) < 1:
+        visual = clip if cfg.uses_clip_visual else dino
+        if visual is None or visual.shape[1] != grid[0] * grid[1] or text.ndim != 2 or len(text) < 1:
             raise ValueError("Invalid token grid or vocabulary")
-        if cfg.variant != "C0" and (dino is None or dino.shape[:2] != clip.shape[:2]):
+        if cfg.uses_dino and (dino is None or dino.shape[:2] != visual.shape[:2]):
             raise ValueError("DINO and CLIP grids differ")
         if not self.training and (labels is not None or status is not None):
             raise ValueError("Ground truth cannot enter inference")
         text = norm(text)
-        native = norm(clip) @ text.T
-        z = self.base(torch.cat((clip, dino), -1) if cfg.concat_seed else clip)
+        native = norm(clip) @ text.T if cfg.has_decoder else None
+        z = self.base(torch.cat((clip, dino), -1) if cfg.concat_seed else visual)
+        if cfg.variant == "D02":
+            z = z + self.capacity(z)
         if cfg.multilayer_residual:
             z = z + self.merge(torch.cat((self.clip_merge(clip_layers), self.dino_merge(dino_layers)), -1))
+        if cfg.variant == "F01":
+            z = z + self.dino_projection(dino)
         cs = norm(z) @ text.T
+        if cfg.variant == "F02":
+            cs = .5 * (cs + norm(self.dino_projection(dino)) @ text.T)
         full_k = len(text)
         keep = torch.arange(full_k, device=text.device)
         result = {}
@@ -523,9 +571,13 @@ class CombinationCore(nn.Module):
                 weight = self.fusion(clip,dino,text,aligned,cs,ds,grid)
             seed = seed + weight * (ds_scale * ds - seed)
             if self.training and labels is not None:
-                regions, ids = pool_regions(dino.detach(), labels, grid, full_k, ignore,cfg.region_mode)
-                result["alignment_loss"] = region_contrastive(regions, ids, aligned, ds_scale)
-                result["regions"], result["region_ids"] = regions, ids
+                if cfg.variant == "F09":
+                    result["alignment_loss"] = patch_alignment_loss(ds_scale * ds, labels, grid, ignore)
+                else:
+                    regions, ids = pool_regions(dino.detach(), labels, grid, full_k, ignore, cfg.region_mode)
+                    result["alignment_loss"] = region_contrastive(regions, ids, aligned, ds_scale,
+                                                                  reverse_direction=cfg.variant != "F08")
+                    result["regions"], result["region_ids"] = regions, ids
                 if cfg.use_pixel and cfg.pseudo and pseudo_enabled:
                     status=(labels!=ignore).long() if status is None else status
                     # No memory-conditioned teacher, no novel-class names, no hard negative from ignore.
@@ -566,7 +618,7 @@ class CombinationCore(nn.Module):
         if delta is not None:
             logits = logits + F.interpolate(delta, output_size, mode="bilinear", align_corners=False)
         if len(keep) != full_k:
-            logits = logits.new_full((len(clip), full_k, *output_size), -1e4).index_copy(1, keep, logits)
+            logits = logits.new_full((len(visual), full_k, *output_size), -1e4).index_copy(1, keep, logits)
         result["logits"], result["kept"] = logits, keep
         return result
 

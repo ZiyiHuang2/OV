@@ -97,12 +97,15 @@ class DualPatchSegmenter(nn.Module):
         )
 
     @torch.no_grad()
+    def dino_tokens(self, rgb):
+        inputs = (rgb - self.dino_mean) / self.dino_std
+        return self.dino.forward_features(inputs)["x_norm_patchtokens"].float()
+
+    @torch.no_grad()
     def encode_patches(self, images):
         rgb = self.resize_rgb(images)
         clip_patches = self.clip_tokens(rgb)[:, 1:]
-        dino_input = (rgb - self.dino_mean) / self.dino_std
-        dino_patches = self.dino.forward_features(dino_input)["x_norm_patchtokens"].float()
-        return clip_patches, dino_patches
+        return clip_patches, self.dino_tokens(rgb)
 
     def pixel_logits(self, patches, text, output_size):
         similarities = F.normalize(patches, dim=-1) @ text.T

@@ -17,13 +17,13 @@ seed=${CSERIES_SEED:-42}
 held=${CSERIES_HELD_SPLIT:-}
 unattended=${CSERIES_UNATTENDED:-0}
 [[ "$unattended" == 0 || "$unattended" == 1 ]] || { echo 'Invalid CSERIES_UNATTENDED' >&2; exit 2; }
-lane_a=(C0 D0 C2 C3 C5 E01)
-lane_b=(B0 C1 C4 C6 E02)
-allowed=(C0 B0 D0 C1 C2 C3 C4 C5 C6 E01 E02)
+lane_a=(C0 D0 C2 C3 C5 E01 D01 F01 F08)
+lane_b=(B0 C1 C4 C6 E02 D02 F02 F09)
+allowed=("${lane_a[@]}" "${lane_b[@]}")
 defaults=C0,B0,D0,C1,C2,C3,C4,C5,C6
 if [[ -n "$held" ]]; then
   [[ "$held" == H1 || "$held" == H2 ]] || { echo 'CSERIES_HELD_SPLIT must be H1 or H2' >&2; exit 2; }
-  allowed=(C0 B0 D0 C1 C2 E01 E02)
+  allowed=(C0 B0 D0 C1 C2 D01 D02 E01 E02 F01 F02 F08 F09)
   defaults=C0,B0
 fi
 selection=${CSERIES_VARIANTS:-$defaults}
@@ -35,6 +35,20 @@ for v in "${variants[@]}"; do
     { echo "Unsupported or repeated variant: $v" >&2; exit 2; }
   selected+="$v,"
 done
+size=${CSERIES_SIZE:-384}
+[[ "$size" =~ ^[1-9][0-9]{1,3}$ ]] && (( size % 16 == 0 )) ||
+  { echo 'CSERIES_SIZE must be a positive multiple of 16' >&2; exit 2; }
+c2_control=${CSERIES_C2_CONTROL:-}
+c2_flags=()
+case "$c2_control" in
+  '') ;;
+  mean|learned|separate) c2_flags=(--fusion "$c2_control") ;;
+  noalign) c2_flags=(--alignment-weight 0) ;;
+  classpool) c2_flags=(--region-mode class) ;;
+  *) echo 'Invalid CSERIES_C2_CONTROL' >&2; exit 2 ;;
+esac
+[[ -z "$c2_control" || "$selection" == C2 ]] ||
+  { echo 'CSERIES_C2_CONTROL requires CSERIES_VARIANTS=C2' >&2; exit 2; }
 gpu0=; gpu1=
 if [[ -n "${CSERIES_GPU_IDS:-}" ]]; then
   IFS=, read -r gpu0 gpu1 <<< "$CSERIES_GPU_IDS"
@@ -102,13 +116,16 @@ key=$(printf '%s\n' "$(git rev-parse HEAD)" "$(sha256sum "$source")" "$clip" "$d
 if [[ "$selection" != C0,B0,D0,C1,C2,C3,C4,C5,C6 || "$seed" != 42 || -n "$held" ]]; then
   key=$(printf '%s\n' "$key" "$selection" "$seed" "$held" "$held_key")
 fi
+if [[ "$size" != 384 || -n "$c2_control" ]]; then
+  key=$(printf '%s\n' "$key" "$size" "$c2_control")
+fi
 if [[ -e "$out/protocol.txt" ]]; then
   [[ "$(cat "$out/protocol.txt")" == "$key" ]] || { echo 'Protocol changed; choose a new OUT directory' >&2; exit 2; }
 else
   [[ "$phase" == preflight ]] || { echo 'Run preflight first' >&2; exit 2; }
   printf '%s\n' "$key" > "$out/protocol.txt"
 fi
-common=(--manifest "$manifest" --clip-weights "$clip" --size 384 --device cuda --seed "$seed")
+common=(--manifest "$manifest" --clip-weights "$clip" --size "$size" --device cuda --seed "$seed")
 tracked=0
 loss_flags=()
 if [[ "$epochs" == 40 || -n "$held" ]]; then
@@ -164,7 +181,8 @@ fi
 run_variant() {
   local v=$1 dest e
   local -a weights=() extras=()
-  [[ "$v" == C0 ]] || weights=(--dino-weights "$dino")
+  [[ "$v" == C0 || "$v" == D02 ]] || weights=(--dino-weights "$dino")
+  [[ "$v" != C2 ]] || extras+=("${c2_flags[@]}")
   [[ "$v" != C5 && "$v" != C6 ]] || extras=(--no-pseudo)
   [[ "$v" != C6 ]] || extras+=(--no-route-train)
   if [[ "$phase" == preflight ]]; then
@@ -201,10 +219,10 @@ run_variant() {
     check_report "$out/main/$v/train/report.json" "$v" train "$epochs"
     if [[ "$epochs" == 40 ]]; then
       for e in 015 030; do
-        run_job "$dest/epoch_$e" "$v" "$((10#$e))" eval --manifest "$external" --clip-weights "$clip" --size 384 --device cuda --seed "$seed" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$out/main/$v/train/epoch_$e.pt"
+        run_job "$dest/epoch_$e" "$v" "$((10#$e))" eval --manifest "$external" --clip-weights "$clip" --size "$size" --device cuda --seed "$seed" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$out/main/$v/train/epoch_$e.pt"
       done
     fi
-    run_job "$dest/eval" "$v" "$epochs" eval --manifest "$external" --clip-weights "$clip" --size 384 --device cuda --seed "$seed" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$out/main/$v/train/final.pt"
+    run_job "$dest/eval" "$v" "$epochs" eval --manifest "$external" --clip-weights "$clip" --size "$size" --device cuda --seed "$seed" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$out/main/$v/train/final.pt"
   fi
 }
 run_lane() {

@@ -356,6 +356,8 @@ def main():
           'limit':args.limit,'split':split,'trainable_parameters':sum(p.numel() for p in model.parameters() if p.requires_grad),
           'torch':str(torch.__version__),'device':str(args.device),'dtype':'float32','tf32':False, 'checkpoint_train_manifest': state['metadata']['manifest'] if state else None}
     meta['training_policy'] = training_policy(args, data) if args.mode=='train' else state['metadata'].get('training_policy')
+    if args.mode == 'eval':
+        meta['alignment_weight'] = state['metadata'].get('alignment_weight', args.alignment_weight)
     args.output.mkdir(parents=True,exist_ok=True)
     if args.mode=='train':
         if (args.output/'state.pt').exists() and not args.checkpoint: p.error('Refusing to overwrite a prior run; use a new directory or resume')

@@ -1,6 +1,6 @@
 import unittest
 import torch
-from combination_core import VARIANTS, Config, CombinationCore, segmentation_loss, RelationPropagation, ContextCostFusion, CategoryRouter, pool_regions, unknown_consistency
+from combination_core import VARIANTS, Config, CombinationCore, segmentation_loss, RelationPropagation, ContextCostFusion, CategoryRouter, pool_regions, patch_alignment_loss, unknown_consistency
 
 class TestCore(unittest.TestCase):
     def setUp(self):
@@ -16,7 +16,8 @@ class TestCore(unittest.TestCase):
     def model(self, v, **kwargs):
         return CombinationCore(Config(v, **kwargs), 5, 8, 12, 12, 3, 2)
     def fwd(self, m, text=None, labels=None, **kw):
-        return m(self.c, None if m.cfg.variant == 'C0' else self.d, self.t if text is None else text,
+        return m(self.c if m.cfg.uses_clip_visual else None, self.d if m.cfg.uses_dino else None,
+                 self.t if text is None else text,
                  20., self.grid, (12,16), self.cl,self.dl,self.guides,labels=labels, **kw)
     def test_all_variants(self):
         for v in VARIANTS:
@@ -58,6 +59,21 @@ class TestCore(unittest.TestCase):
             decoder_only = self.fwd(decoder)['logits']
             torch.testing.assert_close(decoder_only, self.fwd(c1)['logits'])
             self.assertFalse(torch.allclose(decoder_only, initial))
+    def test_capacity_and_fusion_pair(self):
+        count = lambda model: sum(p.numel() for p in model.parameters())
+        clip, bigger, dual, early, late = (self.model(v).eval() for v in ('C0', 'D02', 'B0', 'F01', 'F02'))
+        self.assertEqual(count(bigger), count(dual))
+        torch.testing.assert_close(self.fwd(clip)['logits'], self.fwd(bigger)['logits'])
+        self.assertEqual(count(early), count(late))
+        late.load_state_dict(early.state_dict(), strict=True)
+        self.assertFalse(torch.allclose(self.fwd(early)['logits'], self.fwd(late)['logits']))
+    def test_patch_supervision_ignores_unlabeled_pixels(self):
+        logits = torch.tensor([[[2., 0.], [0., 2.]]], requires_grad=True)
+        labels = torch.tensor([[[0, 1, 255, 255]]])
+        result = patch_alignment_loss(logits, labels, (1, 2), 255)
+        torch.testing.assert_close(result, -logits[0, 0].log_softmax(0).mean())
+        result.backward()
+        torch.testing.assert_close(logits.grad[0, 1], torch.zeros(2))
     def test_actual_grid(self):
         torch.manual_seed(2); m=CombinationCore(Config('C4'),15).eval()
         c=torch.randn(1,576,512); d=torch.randn(1,576,768); t=torch.randn(15,512)

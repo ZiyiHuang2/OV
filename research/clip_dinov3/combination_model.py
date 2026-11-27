@@ -7,8 +7,8 @@ from combination_core import CombinationCore
 
 class CSeriesSegmenter(DualPatchSegmenter):
     def __init__(self, clip_path, dino_path, size, config, train_classes):
-        if (config.variant == 'C0') != (dino_path is None):
-            raise ValueError('C0 requires CLIP only; other variants require both encoders')
+        if config.uses_dino != (dino_path is not None):
+            raise ValueError(f'DINOv3 weight path does not match variant {config.variant}')
         super().__init__(clip_path, dino_path, size)
         if self.dino is not None:
             del self.projection  # original B0 projection is reproduced in the new core
@@ -19,11 +19,13 @@ class CSeriesSegmenter(DualPatchSegmenter):
     @torch.no_grad()
     def extract(self, images):
         grid = (self.size // PATCH_SIZE,) * 2
-        if self.config.variant == 'B0':
+        if self.config.variant == 'B0' or self.config.matched_fusion:
             c, d = self.encode_patches(images)
             return c.float(), d.float(), (), (), (), grid
         rgb = self.resize_rgb(images)
-        if self.config.variant == 'C0':
+        if not self.config.uses_clip_visual:
+            return None, self.dino_tokens(rgb), (), (), (), grid
+        if not self.config.uses_dino:
             return self.clip_tokens(rgb)[:, 1:].float(), None, (), (), (), grid
         blocks = self.clip.visual.transformer.resblocks
         if len(blocks) != 12 or len(self.dino.blocks) != 12:
@@ -55,13 +57,16 @@ class CSeriesSegmenter(DualPatchSegmenter):
     def audit_features(self, images):
         """Extra encoder passes only in explicit audit, never in measured inference."""
         c, d, _, _, _, grid = self.extract(images)
-        if self.dino is not None:
+        if self.dino is not None and c is not None:
             ref_c, ref_d = self.encode_patches(images)
             torch.testing.assert_close(c, ref_c.float(), atol=1e-5, rtol=1e-5)
             torch.testing.assert_close(d, ref_d.float(), atol=1e-5, rtol=1e-5)
-        assert c.shape[1:] == (grid[0] * grid[1], CLIP_WIDTH)
+        if c is not None:
+            assert c.shape[1:] == (grid[0] * grid[1], CLIP_WIDTH)
+        if d is not None:
+            assert d.shape[1:] == (grid[0] * grid[1], DINO_WIDTH)
         assert not self.clip.training and all(not p.requires_grad for p in self.clip.parameters())
         if self.dino is not None:
             assert not self.dino.training and all(not p.requires_grad for p in self.dino.parameters())
-        return {'clip': list(c.shape), 'dino': list(d.shape) if d is not None else None,
-                'grid': list(grid), 'encoder_equivalence_checked': self.dino is not None}
+        return {'clip': list(c.shape) if c is not None else None, 'dino': list(d.shape) if d is not None else None,
+                'grid': list(grid), 'encoder_equivalence_checked': self.dino is not None and c is not None}
