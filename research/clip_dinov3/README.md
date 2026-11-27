@@ -43,6 +43,9 @@ dual=(--dino-weights "$dino")
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 ```
 
+
+C-series 正式启动器在 CUDA 前检前读取全部 18,076 / 6,363 对文件，核对发布样本 ID、可解码的 256×256 RGB/单通道 PNG、15 类标签和忽略标记 255。审计报告记录数据文件的 SHA-256 摘要与逐类像素数。V4 队列共享一份报告，路径与文件状态一致时复用。数据内容变化后需要使用新输出目录和新前检。少量数据的冒烟验证可直接调用 run_combinations.py。
+
 ## 复跑
 
 双分支 CUDA 前检用训练集前 16 张做两步，核对初始输出、冻结状态和 DINOv3 投影权重的梯度。后续 CLIP 投影对照可读取前检报告复核数据顺序。
@@ -76,7 +79,7 @@ CLIP-only 对照的视觉前向 batch 为 32，每 8 张更新一次投影。它
 
 ## 留类与 40 轮对照
 
-从 `research/clip_dinov3` 运行下列命令。每个划分、seed、训练预算使用自己的输出目录，且前检与训练使用相同配置。留类入口接收已核验的原始完整 iSAID 清单，前检在输出目录中生成留类清单与像素审计。训练使用 12 类，源域验证用完整 15 类。H1 留出 `storage tank`、`tennis court`、`bridge`，H2 留出 `plane`、`basketball court`、`roundabout`。
+从 `research/clip_dinov3` 运行下列命令。每个划分、seed、训练预算使用自己的输出目录，且前检与训练使用相同配置。留类入口接收已核验的原始完整 iSAID 清单，前检在输出目录中生成留类清单与像素审计，并校验清单绑定的源数据摘要和重映射掩膜摘要。训练使用 12 类，源域验证用完整 15 类。H1 留出 `storage tank`、`tennis court`、`bridge`，H2 留出 `plane`、`basketball court`、`roundabout`。
 
 ```bash
 export CSERIES_HELD_SPLIT=H1 CSERIES_SEED=42 CSERIES_EPOCHS=15
@@ -92,7 +95,7 @@ bash run_isaid_suite.sh main "$manifest" "$clip" "$dino" "$long_output" 24
 
 需要两张卡时，将 `CSERIES_GPU_IDS` 设为逗号分隔的两个 GPU UUID。`CSERIES_UNATTENDED=1` 下，单组失败后该组保留日志与状态文件，同队列后续模型继续。修复故障后用相同命令重新进入，已完成的组复用报告，中断的训练从最近兼容的 `state.pt` 恢复。40 轮使用独立的优化器调度，从原始初始化启动。
 
-40 轮训练结束后，统一评估每两个 epoch 的轻量导出，以及第 15 轮，写入固定 512 图开发集曲线。保留第 15、30、40 轮和开发集最佳导出。默认按开发集 GT 出现类别的 mIoU 选最佳，留类按相同口径的 seen/held 调和均值选最佳，同分保留较早的 checkpoint。最终完整 val 独立报告，像素交叉熵按验证词表和非忽略像素计算。设置审计后的 `EXTERNAL_MANIFEST` 再用相同配置运行 `external`，可评估长训的第 15、30、40 轮。`KEEP_FINAL_STATE=1` 时保留已完成组的最后恢复状态。
+40 轮训练结束后，统一评估每两个 epoch 的轻量导出，以及第 15 轮，写入固定 512 图开发集曲线。保留第 15、30、40 轮和开发集最佳导出。默认按开发集 GT 出现类别的 mIoU 选最佳，留类按相同口径的 seen/held 调和均值选最佳，同分保留较早的 checkpoint。最终固定轮数的完整 val 单独报告，像素交叉熵按验证词表和非忽略像素计算。开发子集取自同一个 val，按其选出的最佳权重只用于开发诊断。设置审计后的 `EXTERNAL_MANIFEST` 再用相同配置运行 `external`，可评估长训的第 15、30、40 轮。`KEEP_FINAL_STATE=1` 时保留已完成组的最后恢复状态。
 
 补 C1 的两格匹配消融时，设置 `CSERIES_VARIANTS=E01,E02`。E01 使用多层语义残差和双线性上采样，E02 使用末层语义种子和 C1 的引导解码。复用历史 B0/C1 结果时，使用全词表、batch 24、15 轮、seed 42 的同一 iSAID 清单和权重版本。[四格对照与依据](C_SERIES_DESIGN.md#c1-factorial-controls)
 
@@ -104,6 +107,20 @@ python run_v4_queue.py --execute --manifest "$manifest" --clip-weights "$clip" \
   --dino-weights "$dino" --output "$queue_output" --gpu "$gpu_a" --gpu "$gpu_b"
 ```
 
-默认命令打印 33 组固定训练配置。加 `--execute` 后才分配 GPU，每组都有独立前检、训练、日志和状态。可用 `--ids` 精确选择任务，用 `--include-reserve` 加入 12 个后备。重复传入 `--external-manifest` 可在全词表模型的预定节点评估已审计外域。队列支持 `--extra resolution` 和 `--extra relations` 两个明确的附加成对实验。
+默认命令打印 33 组固定训练配置。加 `--execute` 后才分配 GPU，每组都有独立前检、训练、日志和状态。可用 `--ids` 精确选择任务，用 `--include-reserve` 加入 12 个后备。重复传入 `--external-manifest` 可在全词表模型的预定节点评估已审计外域。用 `--extra resolution` 或 `--extra relations` 启用分辨率与关系传播附加组，两类附加组各自等待对应的 40 轮完整验证对照。GPU 序号先转换成物理 UUID，防止两种写法指向同一张卡。后备组排在固定组和已满足条件的后续组之后。
 
-设置 `--promote-min-delta` 和 `--reference-root` 可启用最多 11 组同口径晋级。`reference-root` 指向历史 15 轮实验的 `main` 目录。选组使用同一固定开发集上 GT 支持的类别和预先给定的百分点阈值，并检查对应 40 轮基线已完成。F01/F02 同批晋级。各晋级组从原始初始化按 40 轮调度训练。决策写入 `promotions.json`。此次实现的可执行计划不包含需要另定版本和匹配协议的 LoRA、视觉骨干替换、编码器内部交互及语义约束进阶臂。
+设置 `--promote-min-delta` 和 `--reference-root` 可启用最多 11 组同口径晋级。`reference-root` 指向历史 15 轮实验的 `main` 目录。选组使用同一固定开发集上 GT 支持的类别和预先给定的百分点阈值，并检查对应 40 轮基线已完成。E01/E02 和 F01/F02 分别成对晋级。历史报告需要保留同一分支目录下的训练报告，以核对真实训练 batch、优化器和权重。各晋级组从原始初始化按 40 轮调度训练。决策写入 `promotions.json`。此次实现的可执行计划不包含需要另定版本和匹配协议的 LoRA、视觉骨干替换、编码器内部交互及语义约束进阶臂。
+
+## 使用已有权重做推理对照
+
+用同一个 checkpoint、同一清单和各自的输出目录执行下列诊断。默认仍用训练尺寸和原始提示。示例中的分辨率和权重可按预先确定的矩阵传入。
+
+| 诊断 | 评估参数 |
+| --- | --- |
+| 单分辨率 | 分别运行 `--eval-sizes 224`、`--eval-sizes 384`、`--eval-sizes 512`、`--eval-sizes 768` |
+| 四方向 | 单方向分别传入角度。融合时用 `--eval-rotations 0 90 180 270` |
+| 多尺度 | `--eval-sizes 224 384 512` |
+| 原始 CLIP 响应 | `--native-clip-weight 0.25`。系数 0 为训练模型，系数 1 为原始 CLIP patch 响应 |
+| 文本提示 | `--eval-prompt 'a photo of a {}.' --eval-prompt 'an aerial image of a {}.'` |
+
+旋转结果先恢复到原标签坐标，再对像素 logits 取平均。多提示先归一化各模板的文本向量，取平均后再归一化。C6 做多次前向融合或混合 CLIP logits 时需要 `--force-keep-all`，使各次前向的类别通道都有效。单次前向可保留默认筛选。评估报告记录 checkpoint SHA-256、训练元数据、样本顺序摘要和实际推理参数。原始 CLIP 响应诊断复用从 C-series checkpoint 载入的模型对象，显存统计仍包括载入的基础权重。旋转与多尺度是对现有权重的推理诊断，与 [OVRS 的旋转相似度聚合及学习式多尺度融合](https://arxiv.org/abs/2409.07683) 对应不同的实验问题。

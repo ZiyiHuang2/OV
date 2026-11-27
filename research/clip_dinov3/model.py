@@ -65,9 +65,12 @@ class DualPatchSegmenter(nn.Module):
         return self
 
     @torch.no_grad()
-    def text_features(self, classes):
-        tokens = clip.tokenize([PROMPT.format(name) for name in classes])
-        return F.normalize(self.clip.encode_text(tokens.to(self.clip_mean.device)).float(), dim=-1)
+    def text_features(self, classes, prompts=(PROMPT,)):
+        tokens = clip.tokenize([prompt.format(name) for name in classes for prompt in prompts])
+        text = F.normalize(self.clip.encode_text(tokens.to(self.clip_mean.device)).float(), dim=-1)
+        if len(prompts) == 1:
+            return text
+        return F.normalize(text.reshape(len(classes), len(prompts), -1).mean(1), dim=-1)
 
     @torch.no_grad()
     def clip_tokens(self, rgb):

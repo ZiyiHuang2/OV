@@ -15,7 +15,7 @@ import torch
 from torch.utils.data import Dataset
 from torch import nn
 from combination_core import CombinationCore, Config
-from isaid_protocol import HELD_CLASSES, development_epochs, held_identity, prepare_isaid_held
+from isaid_protocol import HELD_CLASSES, development_epochs, file_sha256, finish_tracked_run, held_identity, prepare_isaid_held
 from prepare_supervision import prepare_held, prepare_negatives
 
 
@@ -41,14 +41,83 @@ class FixtureModel(nn.Module):
     def __init__(self):
         super().__init__();self.config=Config('C6',topk=1);self.core=CombinationCore(self.config,5,8,12,12,3,2)
     def text_features(self,classes):return torch.randn(len(classes),8,generator=torch.Generator().manual_seed(5))
-    def forward(self,images,text,labels=None,ignore=255,status=None,pseudo_enabled=True,force_keep_all=False):
+    def forward(self,images,text,labels=None,ignore=255,status=None,pseudo_enabled=True,force_keep_all=False,alignment_enabled=True):
         # Image-dependent deterministic frozen substitute; no fake foundation-weight claims.
         x=images.mean(1).reshape(len(images),12,16).mean(-1)
         c=x[...,None]*torch.arange(1,9);d=x[...,None]*torch.arange(1,13)
-        return self.core(c,d,text,20.,(3,4),(12,16),guides=((d,d),(d,d)),labels=labels,ignore=ignore,status=status,pseudo_enabled=pseudo_enabled,force_keep_all=force_keep_all)
+        return self.core(c,d,text,20.,(3,4),(12,16),guides=((d,d),(d,d)),labels=labels,ignore=ignore,status=status,pseudo_enabled=pseudo_enabled,force_keep_all=force_keep_all,alignment_enabled=alignment_enabled)
 
 
 class TestProtocol(unittest.TestCase):
+    def test_multiscale_rotation_restores_mask_coordinates(self):
+        runner = read_runner()
+
+        class InferenceModel(nn.Module):
+            size = 384
+
+            def forward(self, images, text, force_keep_all):
+                self.assert_keep_all = force_keep_all
+                return {'logits': images[:, :1].float() * (self.size / 384),
+                        'kept': torch.arange(1)}
+
+        model = InferenceModel()
+        # The rectangular shape catches a missing inverse rotation.
+        images = torch.arange(24).reshape(1, 1, 4, 6)
+        args = SimpleNamespace(eval_sizes=(256, 512), eval_rotations=(0, 90, 180, 270), force_keep_all=True)
+        torch.testing.assert_close(runner.inference_passes(args, model, images, None)['logits'], images.float())
+        self.assertEqual(model.size, 384)
+        self.assertTrue(model.assert_keep_all)
+
+    def test_evaluation_rejects_nonfinite_scores_without_eval_loss(self):
+        runner = read_runner()
+        model = FixtureModel()
+        model.train_classes = FixtureData.classes
+        args = SimpleNamespace(device='cpu', eval_samples=None, batch_size=1, workers=0, seed=42,
+                               force_keep_all=False)
+        with patch.object(model, 'forward', return_value={'logits': torch.full((1, 5, 12, 16), float('nan'))}):
+            with self.assertRaisesRegex(RuntimeError, 'Nonfinite evaluation logits'):
+                runner.evaluate(args, model, FixtureData(), {})
+
+    def test_native_clip_blend_and_endpoints(self):
+        runner = read_runner()
+
+        class InferenceModel(nn.Module):
+            size = 384
+
+            def forward(self, images, text, force_keep_all):
+                return {'logits': images[:, :1].float(), 'kept': torch.arange(1)}
+
+            def resize_rgb(self, images):
+                return images
+
+            def clip_tokens(self, images):
+                return images
+
+            def pixel_logits(self, patches, text, output_size):
+                return torch.full((1, 1, *output_size), 6.)
+
+        images = torch.full((1, 3, 4, 6), 2)
+        args = SimpleNamespace(native_clip_weight=.25, force_keep_all=True)
+        model = InferenceModel()
+        text = torch.empty(1, 8)
+        torch.testing.assert_close(runner.inference_passes(args, model, images, text)['logits'],
+                                   torch.full((1, 1, 4, 6), 3.))
+        args.native_clip_weight = 1.
+        with patch.object(model, 'forward', side_effect=AssertionError):
+            torch.testing.assert_close(runner.inference_passes(args, model, images, text)['logits'],
+                                       torch.full((1, 1, 4, 6), 6.))
+
+    def test_cpu_save_does_not_access_cuda_rng(self):
+        runner = read_runner()
+        model = FixtureModel()
+        opt = torch.optim.AdamW(model.core.parameters())
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / 'state.pt'
+            with patch('torch.cuda.is_available', return_value=True), patch('torch.cuda.get_rng_state_all') as get_all:
+                runner.save(out, model, opt, {}, 0, 0, 0, 0, {})
+            get_all.assert_not_called()
+            self.assertIsNone(torch.load(out, weights_only=True)['rng_cuda'])
+
     def test_resume_exact(self):
         runner=read_runner();data=FixtureData()
         with tempfile.TemporaryDirectory() as td:
@@ -134,6 +203,32 @@ class TestProtocol(unittest.TestCase):
                 export = torch.load(out/name, weights_only=True)
                 self.assertEqual((export['epoch'], export['steps'], export['checkpoint_kind']),
                                  (epoch, epoch, 'evaluation_only'))
+    def test_best_checkpoint_requires_matching_report_content(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            train = root / 'train'
+            train.mkdir()
+            candidate = train / 'epoch_003.pt'
+            candidate.write_bytes(b'audited model')
+            expected_hash = file_sha256(candidate)
+            candidate.write_bytes(b'different model')
+            for epoch in (1, 3, 5):
+                folder = root / f'dev_epoch_{epoch:03d}'
+                folder.mkdir()
+                report = {'sample_ids_sha256': 'fixture', 'test_classes': ['ship'],
+                          'class_iou': {'ship': 20 if epoch == 3 else 10},
+                          'confusion_matrix': [[1]], 'checkpoint_steps': epoch}
+                if epoch == 3:
+                    report['checkpoint_sha256'] = expected_hash
+                (folder / 'report.json').write_text(json.dumps(report), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'differs from its development report'):
+                finish_tracked_run(root, 5, '')
+            self.assertFalse((train / 'best.pt').exists())
+            candidate.write_bytes(b'audited model')
+            finish_tracked_run(root, 5, '')
+            self.assertEqual(file_sha256(train / 'best.pt'), expected_hash)
+            self.assertFalse(candidate.exists())
+
     def fixture(self,root):
         (root/'classes.json').write_text(json.dumps(['a','b','c']))
         y=np.array([[0,1,2,255],[0,1,2,255]],dtype=np.uint8)
@@ -160,7 +255,7 @@ class TestProtocol(unittest.TestCase):
             out = root / 'held_data'
             prepare_isaid_held(source, out, 'H1')
             manifest = out / 'manifest.json'
-            initial = held_identity(source, manifest, 'H1')
+            self.assertEqual(len(held_identity(source, manifest, 'H1')), 64)
             with self.assertRaisesRegex(ValueError, 'vocabulary'):
                 held_identity(source, manifest, 'H2')
             self.assertEqual(development_epochs(40), tuple(sorted({15, *range(2, 40, 2)})))
@@ -168,7 +263,8 @@ class TestProtocol(unittest.TestCase):
             with Image.open(path) as image:
                 self.assertEqual(np.asarray(image).tolist(), [[255, 255, 255, 0, 1, 2, 3]])
             Image.fromarray(codes).save(path)
-            self.assertNotEqual(initial, held_identity(source, manifest, 'H1'))
+            with self.assertRaisesRegex(ValueError, 'masks differ from the audited derivative'):
+                held_identity(source, manifest, 'H1')
     def test_negative_evidence_requires_independent_mask(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);p=self.fixture(root);e=root/'evidence.json';e.write_text(json.dumps({'t':'proof.png'}))

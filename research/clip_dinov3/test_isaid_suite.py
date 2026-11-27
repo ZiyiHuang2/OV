@@ -1,4 +1,5 @@
 """Exercise the real Bash launcher in a temporary repository with stub training jobs."""
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -7,9 +8,12 @@ import subprocess
 import sys
 import tempfile
 
+from PIL import Image
+
 
 MOCK = """
 import argparse, json, os
+from hashlib import sha256
 from pathlib import Path
 from isaid_protocol import development_epochs
 
@@ -51,6 +55,7 @@ else:
     bad = os.environ.get('BAD_STAGE') == a.output.name
     report = {'config': {'variant': variant}, 'checkpoint_epoch': epoch - bad,
               'checkpoint_kind': 'evaluation_only', 'checkpoint_steps': epoch * 3,
+              'checkpoint_sha256': sha256(a.checkpoint.read_bytes()).hexdigest(),
               'images': len(manifest['val']), 'miou_percent': 1,
               'test_classes': ['mock'], 'class_iou': {'mock': 2 if epoch == 18 else 1},
               'confusion_matrix': [[1]], 'sample_ids_sha256': 'fixture'}
@@ -65,18 +70,28 @@ def verify(launcher):
         root = Path(tmp)
         shutil.copyfile(launcher, root / "run_isaid_suite.sh")
         shutil.copyfile(launcher.with_name("isaid_protocol.py"), root / "isaid_protocol.py")
-        (root / "prepare_isaid.py").write_text("CLASSES = ['mock']\nSPLIT_SIZES = {'train': 2, 'val': 1}\n")
+        samples_by_split = {"train": ("tr0", "tr1"), "val": ("va0",)}
+        hashes = {split: sha256(''.join(s + '\n' for s in samples).encode()).hexdigest()
+                  for split, samples in samples_by_split.items()}
+        (root / "prepare_isaid.py").write_text(
+            "CLASSES = ['mock']\nSOURCE_REPO = 'fixture'\nSOURCE_REVISION = 'fixture'\n"
+            "SPLIT_SIZES = {'train': 2, 'val': 1}\nTILE_SIZE = (2, 2)\n"
+            f"SPLIT_IDS_SHA256 = {hashes!r}\n"
+        )
         (root / "run_combinations.py").write_text(MOCK)
         (root / "classes.json").write_text('["mock"]')
         manifest = {"ignore_label": 255, "train_classes": "classes.json", "test_classes": "classes.json"}
-        for split, samples in (("train", ("tr0", "tr1")), ("val", ("va0",))):
+        for split, samples in samples_by_split.items():
             manifest[split] = []
             for sample in samples:
                 row = {"sample_id": sample}
                 for sub, key in (("image", "file_name"), ("mask", "sem_seg_file_name")):
                     path = root / sub / f"{sample}.png"
                     path.parent.mkdir(exist_ok=True)
-                    path.touch()
+                    if sub == "image":
+                        Image.new("RGB", (2, 2), color=(ord(sample[0]), ord(sample[-1]), 0)).save(path)
+                    else:
+                        Image.new("L", (2, 2), color=0).save(path)
                     row[key] = str(path.relative_to(root))
                 manifest[split].append(row)
         for name in ("clip.pt", "dino.pt"):
@@ -94,7 +109,8 @@ def verify(launcher):
                                                    "CSERIES_GPU_IDS": "", "KEEP_FINAL_STATE": "0",
                                                    "CSERIES_VARIANTS": "", "CSERIES_SEED": "42",
                                                    "CSERIES_HELD_SPLIT": "", "CSERIES_UNATTENDED": "0",
-                                                   "CSERIES_SIZE": "384", "CSERIES_C2_CONTROL": "", **env},
+                                                   "CSERIES_SIZE": "384", "CSERIES_C2_CONTROL": "",
+                                                   "CSERIES_DATA_AUDIT": str(root / "shared_data_audit.json"), **env},
                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             return result.returncode, result.stdout
 
@@ -109,6 +125,24 @@ def verify(launcher):
         code, log = run("preflight")
         assert not code, log
         assert not list((root / "run/preflight").glob("**/*.pt"))
+        audit = root / "shared_data_audit.json"
+        assert json.loads(audit.read_text())["val"]["pixels_by_id"] == {"0": 4, "255": 0}
+        audit_mtime = audit.stat().st_mtime_ns
+        code, log = run("preflight", dest="reuse_audit")
+        assert not code, log
+        assert audit.stat().st_mtime_ns == audit_mtime
+        late_mask = root / "mask/tr1.png"
+        original_bytes = late_mask.read_bytes()
+        Image.new("L", (2, 2), color=1).save(late_mask)
+        code, log = run("main")
+        assert code and "invalid iSAID label IDs" in log, log
+        Image.new("L", (3, 2), color=0).save(late_mask)
+        code, log = run("main")
+        assert code and "invalid iSAID indexed mask" in log, log
+        Image.new("L", (2, 2), color=255).save(late_mask)
+        code, log = run("main")
+        assert code and "Protocol changed" in log, log
+        late_mask.write_bytes(original_bytes)
         train = root / "run/main/C0/train"
         train.mkdir(parents=True)
         state = train / "state.pt"
@@ -180,6 +214,13 @@ def verify(launcher):
         assert "mean_pixel_cross_entropy" in (tracked_dir / "summary.csv").read_text()
         external = root / "external.json"
         external.write_text(json.dumps(manifest))
+        code, log = run("external", dest="tracked", EXTERNAL_MANIFEST=str(external), **tracked)
+        assert code and "External validation references files from the iSAID source" in log, log
+        external_row = {"sample_id": "external0", "file_name": "image/external0.png",
+                        "sem_seg_file_name": "mask/external0.png"}
+        Image.new("RGB", (2, 2), color=(1, 1, 1)).save(root / external_row["file_name"])
+        Image.new("L", (2, 2), color=0).save(root / external_row["sem_seg_file_name"])
+        external.write_text(json.dumps({**manifest, "val": [external_row]}))
         code, log = run("external", dest="tracked", EXTERNAL_MANIFEST=str(external), **tracked)
         assert not code, log
         external_summary, = (root / "tracked/external").glob("*/summary.csv")

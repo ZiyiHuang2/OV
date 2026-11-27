@@ -69,50 +69,24 @@ exec 9>"$out/.suite.lock"
 flock -n 9 || { echo "Another suite process owns $out" >&2; exit 2; }
 snapshot_schedule=$("$PYTHON" -c 'import sys; from isaid_protocol import development_epochs; print(*(f"{e:03d}" for e in development_epochs(int(sys.argv[1]))))' "$epochs")
 read -r -a dev_epochs <<< "$snapshot_schedule"
-# Check the original published vocabulary/split before launching any job.
-"$PYTHON" - "$manifest" "$clip" "$dino" <<'PY'
-import json, sys
-from pathlib import Path
-from prepare_isaid import CLASSES, SPLIT_SIZES
-p=Path(sys.argv[1]); m=json.loads(p.read_text(encoding='utf-8'))
-if m['ignore_label'] != 255:
-    raise ValueError('iSAID ignore label must be 255')
-for field in ('train_classes','test_classes'):
-    if json.loads((p.parent/m[field]).read_text(encoding='utf-8')) != CLASSES:
-        raise ValueError(f'Unexpected iSAID vocabulary: {field}')
-ids={}
-for split,n in SPLIT_SIZES.items():
-    rows=m[split]; ids[split]={r['sample_id'] for r in rows}
-    if len(rows) != n or len(ids[split]) != n:
-        raise ValueError(f'{split}: expected {n} unique sample IDs, found {len(rows)} rows and {len(ids[split])} IDs')
-    for r in rows:
-        for key in ('file_name','sem_seg_file_name'):
-            file = p.parent/r[key]
-            if file.suffix != '.png' or file.stem != r['sample_id']:
-                raise ValueError(f'{split}: {key} does not match PNG sample {r["sample_id"]}: {file}')
-            if not file.is_file():
-                raise FileNotFoundError(file)
-        if split=='train' and r.get('pixel_status_file_name'):
-            raise ValueError('Use the original iSAID manifest, not an extra supervision manifest')
-if ids['train'] & ids['val']:
-    raise ValueError('Train/val sample ID overlap')
-for f in sys.argv[2:]:
-    if not Path(f).is_file(): raise FileNotFoundError(f)
-print('Manifest and weight paths checked; runner verifies weight hashes and loaded masks.')
-PY
+# The queue shares one full decoded data audit across jobs. A standalone
+# invocation keeps its audit alongside its preflight and protocol.
+[[ -f "$clip" && -f "$dino" ]] || { echo 'Missing encoder weights' >&2; exit 2; }
+audit_report=${CSERIES_DATA_AUDIT:-"$out/isaid_data_audit.json"}
+source_data_hash=$("$PYTHON" -c 'from isaid_protocol import audit_isaid; import sys; print(audit_isaid(*sys.argv[1:])["data_sha256"])' "$manifest" "$audit_report")
 # Bind the preflight to the selected models, data and optimizer horizon.
 source=$manifest
 if [[ -n "$held" ]]; then
   manifest="$out/held_data/manifest.json"
   if [[ ! -f "$manifest" ]]; then
     [[ "$phase" == preflight ]] || { echo 'Generate held-class data with preflight first' >&2; exit 2; }
-    "$PYTHON" -c 'from isaid_protocol import prepare_isaid_held; import sys; prepare_isaid_held(*sys.argv[1:])' "$source" "$out/held_data" "$held"
+    "$PYTHON" -c 'from isaid_protocol import prepare_isaid_held; import sys; prepare_isaid_held(*sys.argv[1:])' "$source" "$out/held_data" "$held" "$source_data_hash"
   fi
-  held_key=$("$PYTHON" -c 'from isaid_protocol import held_identity; import sys; print(held_identity(*sys.argv[1:]))' "$source" "$manifest" "$held")
+  held_key=$("$PYTHON" -c 'from isaid_protocol import held_identity; import sys; print(held_identity(*sys.argv[1:]))' "$source" "$manifest" "$held" "$source_data_hash")
 else
   held_key=
 fi
-key=$(printf '%s\n' "$(git rev-parse HEAD)" "$(sha256sum "$source")" "$clip" "$dino" "$batch" "$epochs" "${train_policy[*]}")
+key=$(printf '%s\n' "$(git rev-parse HEAD)" "$(sha256sum "$source")" "$source_data_hash" "$clip" "$dino" "$batch" "$epochs" "${train_policy[*]}")
 if [[ "$selection" != C0,B0,D0,C1,C2,C3,C4,C5,C6 || "$seed" != 42 || -n "$held" ]]; then
   key=$(printf '%s\n' "$key" "$selection" "$seed" "$held" "$held_key")
 fi
@@ -125,7 +99,7 @@ else
   [[ "$phase" == preflight ]] || { echo 'Run preflight first' >&2; exit 2; }
   printf '%s\n' "$key" > "$out/protocol.txt"
 fi
-common=(--manifest "$manifest" --clip-weights "$clip" --size "$size" --device cuda --seed "$seed")
+common=(--manifest "$manifest" --data-sha256 "$source_data_hash" --clip-weights "$clip" --size "$size" --device cuda --seed "$seed")
 tracked=0
 loss_flags=()
 if [[ "$epochs" == 40 || -n "$held" ]]; then
@@ -133,10 +107,11 @@ if [[ "$epochs" == 40 || -n "$held" ]]; then
   loss_flags=(--eval-loss)
 fi
 check_report() {
-  "$PYTHON" - "$1" "$2" "$3" "$4" <<'PY'
+  "$PYTHON" - "$1" "$2" "$3" "$4" "${5:-}" <<'PY'
 import json, sys
 from pathlib import Path
-path, variant, kind, expected = sys.argv[1:]
+from isaid_protocol import file_sha256
+path, variant, kind, expected, checkpoint = sys.argv[1:]
 r = json.loads(Path(path).read_text(encoding='utf-8'))
 if r['config']['variant'] != variant:
     raise ValueError(f'Unexpected variant: {path}')
@@ -147,13 +122,22 @@ else:
     if (r['checkpoint_epoch'] != int(expected) or r['checkpoint_kind'] != 'evaluation_only'
             or r['checkpoint_steps'] <= 0 or r['images'] <= 0 or r['miou_percent'] is None):
         raise ValueError(f'Evaluation is incomplete for epoch {expected}: {path}')
+    if checkpoint and Path(checkpoint).is_file() and r.get('checkpoint_sha256') != file_sha256(Path(checkpoint)):
+        raise ValueError(f'Evaluation checkpoint content changed: {checkpoint}')
 PY
 }
 run_job() {
   local dest=$1 variant=$2 expected=$3 kind=$4
   shift 3
   local -a recovery=()
-  if [[ -f "$dest/report.json" ]] && check_report "$dest/report.json" "$variant" "$kind" "$expected" 2>/dev/null; then
+  local checkpoint= value previous=
+  if [[ "$kind" == eval ]]; then
+    for value in "$@"; do
+      if [[ "$previous" == --checkpoint ]]; then checkpoint=$value; break; fi
+      previous=$value
+    done
+  fi
+  if [[ -f "$dest/report.json" ]] && check_report "$dest/report.json" "$variant" "$kind" "$expected" "$checkpoint" 2>/dev/null; then
     echo "Completed: $dest"
     return
   fi
@@ -167,7 +151,7 @@ run_job() {
   fi
   mkdir -p "$dest"
   "$PYTHON" -u run_combinations.py "$@" "${recovery[@]}" --output "$dest" 2>&1 | tee -a "$dest/console.log"
-  check_report "$dest/report.json" "$variant" "$kind" "$expected"
+  check_report "$dest/report.json" "$variant" "$kind" "$expected" "$checkpoint"
 }
 if [[ "$phase" != preflight ]]; then
   [[ -f "$out/preflight.ok" ]] && [[ "$(cat "$out/preflight.ok")" == "$key" ]] || { echo 'Matching preflight has not completed' >&2; exit 2; }
@@ -175,7 +159,7 @@ fi
 if [[ "$phase" == external ]]; then
   : "${EXTERNAL_MANIFEST:?Set EXTERNAL_MANIFEST to an audited external val manifest}"
   external=$(realpath "$EXTERNAL_MANIFEST")
-  [[ "$external" != "$manifest" && "$external" != "$source" ]] || { echo 'External manifest must differ from training manifest'; exit 2; }
+  "$PYTHON" -c 'from isaid_protocol import check_external_source; import sys; check_external_source(*sys.argv[1:])' "$source" "$external"
   tag=$(sha256sum "$external" | cut -c1-16)
 fi
 run_variant() {

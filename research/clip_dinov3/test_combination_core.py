@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 import torch
 from combination_core import VARIANTS, Config, CombinationCore, segmentation_loss, RelationPropagation, ContextCostFusion, CategoryRouter, pool_regions, patch_alignment_loss, region_contrastive, unknown_consistency
 
@@ -74,6 +75,26 @@ class TestCore(unittest.TestCase):
         torch.testing.assert_close(result, -logits[0, 0].log_softmax(0).mean())
         result.backward()
         torch.testing.assert_close(logits.grad[0, 1], torch.zeros(2))
+    def test_disabled_alignment_preserves_segmentation_and_prototype_inputs(self):
+        for variant in ('C2', 'C5', 'F09'):
+            with self.subTest(variant=variant):
+                model = self.model(variant)
+                enabled = self.fwd(model, labels=self.y)
+                with patch('combination_core.pool_regions', wraps=pool_regions) as pool:
+                    disabled = self.fwd(model, labels=self.y, alignment_enabled=False)
+                    self.assertEqual(pool.call_count, int(model.cfg.use_rs))
+                self.assertIn('alignment_loss', enabled)
+                self.assertNotIn('alignment_loss', disabled)
+                torch.testing.assert_close(disabled['logits'], enabled['logits'])
+                seg = segmentation_loss(disabled['logits'], self.y)
+                self.assertGreater(torch.autograd.grad(seg, model.text_map[0].weight)[0].norm().item(), 0)
+                if model.cfg.use_rs:
+                    torch.testing.assert_close(disabled['region_ids'], enabled['region_ids'])
+                    torch.testing.assert_close(disabled['regions'], enabled['regions'])
+                    model.memory.update(disabled['regions'], disabled['region_ids'])
+                    self.assertGreater(model.memory.counts.sum().item(), 0)
+                else:
+                    self.assertNotIn('regions', disabled)
     def test_one_way_region_alignment_preserves_forward_weight_and_gradient(self):
         regions = torch.tensor([[2., 1.], [1., 2.], [-1., 1.]])
         labels = torch.tensor([0, 0, 1])

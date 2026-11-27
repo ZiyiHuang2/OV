@@ -5,6 +5,7 @@ from hashlib import sha256
 import json
 import math
 from pathlib import Path
+from string import Formatter
 from time import perf_counter
 
 import numpy as np
@@ -69,10 +70,11 @@ def step_lr(base_lr, step, policy):
 
 
 def save(path, model, opt, meta, epoch, cursor, steps, seen, progress):
+    device = next(model.parameters()).device
     state = {'metadata': meta, 'core': model.core.state_dict(), 'optimizer': opt.state_dict(),
              'epoch': epoch, 'cursor': cursor, 'steps': steps, 'seen': seen, 'progress': progress,
              'rng_cpu': torch.get_rng_state(),
-             'rng_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []}
+             'rng_cuda': torch.cuda.get_rng_state(device) if device.type == 'cuda' else None}
     atomic_save(path, state)
 
 
@@ -119,7 +121,7 @@ def train(args, model, data, meta, state):
     if state:
         if state.get('checkpoint_kind') == 'evaluation_only':
             raise ValueError('Evaluation-only checkpoint: exact training resume requires state.pt')
-        for key in ('weights', 'size', 'prompt', 'manifest', 'train_classes', 'config', 'seed', 'batch_size', 'lr', 'weight_decay', 'ignore_id', 'limit', 'alignment_weight', 'region_to_text_loss_fraction', 'aux_weight', 'pseudo_weight', 'pseudo_warmup', 'schema', 'training_policy'):
+        for key in ('weights', 'size', 'prompt', 'manifest', 'data_sha256', 'train_classes', 'config', 'seed', 'batch_size', 'lr', 'weight_decay', 'ignore_id', 'limit', 'alignment_weight', 'region_to_text_loss_fraction', 'aux_weight', 'pseudo_weight', 'pseudo_warmup', 'schema', 'training_policy'):
             if state['metadata'].get(key) != meta.get(key):
                 raise ValueError(f'Resume mismatch: {key}')
         if 'progress' not in state:
@@ -129,14 +131,22 @@ def train(args, model, data, meta, state):
         start_epoch, start_cursor, steps, seen = (state[k] for k in ('epoch', 'cursor', 'steps', 'seen'))
         progress = state['progress']
         torch.set_rng_state(state['rng_cpu'])
-        if torch.cuda.is_available() and state['rng_cuda']:
-            torch.cuda.set_rng_state_all(state['rng_cuda'])
+        device = torch.device(args.device)
+        cuda_rng = state['rng_cuda']
+        if device.type == 'cuda':
+            if isinstance(cuda_rng, list):  # Schema 2 states before device-local RNG capture.
+                index = torch.cuda.current_device() if device.index is None else device.index
+                cuda_rng = cuda_rng[index] if index < len(cuda_rng) else None
+            if cuda_rng is None:
+                raise ValueError('Training resume requires the checkpoint CUDA RNG state')
+            torch.cuda.set_rng_state(cuda_rng, device)
     if args.max_steps and steps >= args.max_steps and start_epoch < args.epochs:
         raise ValueError('Checkpoint already at requested max_steps')
     t = perf_counter()
-    cuda = torch.device(args.device).type == 'cuda'
+    device = torch.device(args.device)
+    cuda = device.type == 'cuda'
     if cuda:
-        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.reset_peak_memory_stats(device)
     audit = progress['audit']
     frozen = [(p, p._version) for name, p in model.named_parameters() if not name.startswith('core.')]
     dev_epochs = development_epochs(args.epochs)
@@ -156,7 +166,8 @@ def train(args, model, data, meta, state):
             for group in opt.param_groups:
                 group['lr'] = lr
             opt.zero_grad(set_to_none=True)
-            r = model(images, text, labels=labels, ignore=data.ignore_id, status=status, pseudo_enabled=steps>=args.pseudo_warmup)
+            r = model(images, text, labels=labels, ignore=data.ignore_id, status=status,
+                      pseudo_enabled=steps >= args.pseudo_warmup, alignment_enabled=args.alignment_weight > 0)
             seg = segmentation_loss(r['logits'], labels, data.ignore_id, model.config.use_pixel, status)
             zero = seg.new_zeros(())
             align = args.alignment_weight * r.get('alignment_loss', zero)
@@ -215,8 +226,8 @@ def train(args, model, data, meta, state):
     return {**meta, 'steps': steps, 'seen_images': seen, 'completed_epochs': len(progress['epochs']),
             'epoch_history': progress['epochs'], 'train_statistics': s, 'mean_loss': s['mean_loss'],
             'wall_seconds_this_invocation': perf_counter() - t, 'audit': audit,
-            'train_peak_cuda_mib_this_invocation': torch.cuda.max_memory_allocated()/2**20 if cuda else None,
-            'train_peak_reserved_cuda_mib_this_invocation': torch.cuda.max_memory_reserved()/2**20 if cuda else None,
+            'train_peak_cuda_mib_this_invocation': torch.cuda.max_memory_allocated(device)/2**20 if cuda else None,
+            'train_peak_reserved_cuda_mib_this_invocation': torch.cuda.max_memory_reserved(device)/2**20 if cuda else None,
             'pseudo_selected_patches': s['pseudo_count'], 'wholly_unknown_patches': s['unknown_count'],
             'verified_negative_pixels': s['neg_pixels'], 'mean_train_kept': s['mean_train_kept'], 'region_count': s['regions']}
 
@@ -226,17 +237,52 @@ def mean_for(iou, indices):
     return sum(vals) / len(vals) if vals else None
 
 
+def inference_passes(args, model, images, text):
+    sizes = getattr(args, 'eval_sizes', None)
+    rotations = getattr(args, 'eval_rotations', (0,))
+    native_weight = getattr(args, 'native_clip_weight', 0.)
+    if sizes is None and rotations == (0,) and not native_weight:
+        return model(images, text, force_keep_all=args.force_keep_all)
+
+    original_size = model.size
+    scores = None
+    sizes = sizes or (original_size,)
+    try:
+        for size in sizes:
+            model.size = size
+            for angle in rotations:
+                turns = angle // 90
+                rotated = torch.rot90(images, turns, (-2, -1)) if turns else images
+                if native_weight < 1.:
+                    result = model(rotated, text, force_keep_all=args.force_keep_all)
+                    logits, kept = result['logits'], result['kept']
+                if native_weight:
+                    patches = model.clip_tokens(model.resize_rgb(rotated))[:, 1:]
+                    native = model.pixel_logits(patches, text, rotated.shape[-2:])
+                    logits = torch.lerp(logits, native, native_weight) if native_weight < 1. else native
+                    kept = torch.arange(len(text), device=native.device)
+                aligned = torch.rot90(logits, -turns, (-2, -1)) if turns else logits
+                scores = aligned.clone() if scores is None else scores.add_(aligned)
+    finally:
+        model.size = original_size
+    return {'logits': scores.div_(len(sizes) * len(rotations)), 'kept': kept}
+
+
 @torch.no_grad()
 def evaluate(args, model, data, meta):
-    model.eval(); text = model.text_features(data.classes); k = len(data.classes)
+    model.eval()
+    prompts = getattr(args, 'eval_prompts', None)
+    text = model.text_features(data.classes, prompts) if prompts else model.text_features(data.classes)
+    k = len(data.classes)
     confusion = torch.zeros(k, k, dtype=torch.long, device=args.device)
-    cuda = torch.device(args.device).type == 'cuda'
+    device = torch.device(args.device)
+    cuda = device.type == 'cuda'
     if cuda:
         warm = torch.stack([data[i][0] for i in range(min(len(data), args.batch_size))]).to(args.device)
         for _ in range(args.warmup):
-            model(warm, text, force_keep_all=args.force_keep_all)['logits'].argmax(1)
-        torch.cuda.synchronize(); del warm
-        torch.cuda.reset_peak_memory_stats()
+            inference_passes(args, model, warm, text)['logits'].argmax(1)
+        torch.cuda.synchronize(device); del warm
+        torch.cuda.reset_peak_memory_stats(device)
     times, sizes = [], []; present_classes = retained_classes = retained_pixels = total_pixels = 0
     compute_loss = getattr(args, 'eval_loss', False)
     loss_sum = torch.zeros((), dtype=torch.float64, device=args.device) if compute_loss else None
@@ -247,14 +293,24 @@ def evaluate(args, model, data, meta):
     for images, labels, _, names in loader(data, args, sample_order):
         images = images.to(args.device, non_blocking=True)
         if cuda:
-            torch.cuda.reset_peak_memory_stats(); start = torch.cuda.Event(enable_timing=True); end = torch.cuda.Event(enable_timing=True); start.record()
+            torch.cuda.reset_peak_memory_stats(device)
+            stream = torch.cuda.current_stream(device)
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record(stream)
         else:
             start = perf_counter()
-        r = model(images, text, force_keep_all=args.force_keep_all); pred = r['logits'].argmax(1)
+        r = inference_passes(args, model, images, text)
+        pred = r['logits'].argmax(1)
         if cuda:
-            end.record(); end.synchronize(); times.append(start.elapsed_time(end)); peak = max(peak, torch.cuda.max_memory_allocated())
+            end.record(stream)
+            end.synchronize()
+            times.append(start.elapsed_time(end))
+            peak = max(peak, torch.cuda.max_memory_allocated(device))
         else:
             times.append((perf_counter() - start) * 1000)
+        if not torch.isfinite(r['logits']).all():
+            raise RuntimeError(f'Nonfinite evaluation logits on {names}')
         keep = r['kept']; sizes.extend([len(keep)] * len(images))
         labels = labels.to(args.device); valid = labels != data.ignore_id
         if compute_loss:
@@ -292,7 +348,7 @@ def main():
     p.add_argument('--variant', choices=VARIANTS)
     for name in ('manifest','clip-weights','dino-weights','output','checkpoint'):
         p.add_argument('--'+name, type=Path, required=name in ('manifest','clip-weights','output'))
-    p.add_argument('--device', default='cuda'); p.add_argument('--size',type=int,default=384)
+    p.add_argument('--device', default='cuda'); p.add_argument('--size',type=int,help='Training encoder size (384 by default); evaluation defaults to the recorded size')
     p.add_argument('--batch-size',type=int,default=1); p.add_argument('--workers',type=int,default=0)
     p.add_argument('--limit',type=int); p.add_argument('--seed',type=int,default=42)
     p.add_argument('--epochs',type=int,default=5); p.add_argument('--lr',type=float,default=1e-3)
@@ -300,7 +356,12 @@ def main():
     p.add_argument('--train-warmup-steps',type=int,default=300)
     p.add_argument('--min-lr-ratio',type=float,default=.1); p.add_argument('--grad-clip',type=float,default=1.)
     p.add_argument('--eval-samples',type=int); p.add_argument('--eval-sample-seed',type=int,default=42)
+    p.add_argument('--data-sha256', help='Content identity from the audited source release')
     p.add_argument('--eval-loss', action='store_true', help='Report pixel cross-entropy over the evaluation vocabulary')
+    p.add_argument('--eval-sizes', type=int, nargs='+', help='Evaluate at these sizes, averaging native-grid pixel logits across passes')
+    p.add_argument('--eval-prompt', dest='eval_prompts', action='append', help='Template containing one {}; repeat to average normalized text embeddings')
+    p.add_argument('--native-clip-weight', type=float, default=0., help='Weight of native CLIP patch logits in an inference-only blend')
+    p.add_argument('--eval-rotations', type=int, choices=(0, 90, 180, 270), nargs='+', help='Rotate inputs, invert output rotations and average logits')
     p.add_argument('--weight-decay',type=float,default=.01); p.add_argument('--max-steps',type=int)
     p.add_argument('--save-every',type=int,default=500); p.add_argument('--warmup',type=int,default=30)
     p.add_argument('--audit',action='store_true'); p.add_argument('--force-keep-all',action='store_true')
@@ -323,20 +384,57 @@ def main():
     p.add_argument('--pixel',action=argparse.BooleanOptionalAction,default=None)
     p.add_argument('--alignment-weight',type=float,default=.2); p.add_argument('--aux-weight',type=float,default=.2)
     args=p.parse_args()
+    if args.data_sha256 is not None and (len(args.data_sha256) != 64 or
+                                         any(c not in '0123456789abcdef' for c in args.data_sha256)):
+        p.error('--data-sha256 requires a lowercase SHA-256 digest')
     if args.batch_size<1 or args.save_every<1 or args.epochs<1 or args.alignment_weight<0 or args.aux_weight<0 or args.pseudo_weight<0 or args.pseudo_warmup<0: p.error('Invalid training settings')
     if args.lr <= 0 or args.train_warmup_steps < 0 or not 0 <= args.min_lr_ratio <= 1 or args.grad_clip < 0: p.error('Invalid optimizer policy')
     if args.eval_samples is not None and (args.mode!='eval' or args.eval_samples<1 or args.limit is not None): p.error('Use positive --eval-samples only in eval, without --limit')
-    if args.mode != 'eval' and args.eval_loss: p.error('--eval-loss is evaluation only')
+    if args.mode != 'eval' and (args.eval_loss or args.eval_sizes or args.eval_rotations
+                               or args.eval_prompts or args.native_clip_weight):
+        p.error('Evaluation diagnostics are evaluation only')
+    args.eval_sizes = tuple(args.eval_sizes) if args.eval_sizes else None
+    args.eval_rotations = tuple(args.eval_rotations or (0,))
+    if args.eval_sizes and (any(size <= 0 or size % 16 for size in args.eval_sizes)
+                            or len(set(args.eval_sizes)) != len(args.eval_sizes)):
+        p.error('--eval-sizes requires distinct positive multiples of 16')
+    if len(set(args.eval_rotations)) != len(args.eval_rotations):
+        p.error('--eval-rotations requires distinct angles')
+    if not 0. <= args.native_clip_weight <= 1.:
+        p.error('--native-clip-weight must lie between 0 and 1')
+    for prompt in args.eval_prompts or ():
+        try:
+            fields = [(name, spec, conv) for _, name, spec, conv in Formatter().parse(prompt) if name is not None]
+        except ValueError:
+            fields = []
+        if fields != [('', '', None)]:
+            p.error('--eval-prompt requires one unformatted {} class placeholder')
+    if args.eval_prompts and len(set(args.eval_prompts)) != len(args.eval_prompts):
+        p.error('--eval-prompt templates must be distinct')
     if args.mode=='eval' and not args.checkpoint: p.error('Evaluation requires checkpoint')
     if args.mode=='train' and args.force_keep_all: p.error('--force-keep-all is evaluation only; use --no-route-train for full-vocabulary training')
     torch.set_num_threads(2); torch.manual_seed(args.seed)
     torch.backends.cuda.matmul.allow_tf32=False; torch.backends.cudnn.allow_tf32=False
-    state=torch.load(args.checkpoint,map_location='cpu',weights_only=True) if args.checkpoint else None
+    state = checkpoint_sha256 = None
+    if args.checkpoint:
+        with args.checkpoint.open('rb') as checkpoint:
+            if args.mode == 'eval':
+                digest = sha256()
+                for chunk in iter(lambda: checkpoint.read(4 << 20), b''):
+                    digest.update(chunk)
+                checkpoint_sha256 = digest.hexdigest()
+                checkpoint.seek(0)
+            state = torch.load(checkpoint, map_location='cpu', weights_only=True)
     if state is not None and state['metadata'].get('schema')!=2: p.error('V1 checkpoint: use pinned V1 commit; V2 parameters differ')
     if args.mode=='train' and state is not None and state.get('checkpoint_kind')=='evaluation_only':
         p.error('Evaluation-only checkpoint cannot resume optimizer/RNG; use state.pt')
+    if args.size is None:
+        args.size = state['metadata']['size'] if args.mode == 'eval' else 384
     if args.mode=='eval':
         cfg=Config(**state['metadata']['config']); train_classes=state['metadata']['train_classes']
+        multipass = len(args.eval_sizes or (args.size,)) * len(args.eval_rotations) > 1
+        if cfg.variant == 'C6' and (multipass or args.native_clip_weight) and not args.force_keep_all:
+            p.error('C6 multi-pass or native-CLIP logit averaging requires --force-keep-all')
         if args.variant and args.variant!=cfg.variant: p.error('Variant differs from checkpoint')
         if args.topk is not None or args.router is not None:
             if cfg.variant!='C6': p.error('Routing overrides require C6')
@@ -355,9 +453,12 @@ def main():
           'weight_decay':args.weight_decay,'alignment_weight':args.alignment_weight,'aux_weight':args.aux_weight,'pseudo_weight':args.pseudo_weight,'pseudo_warmup':args.pseudo_warmup,
           'limit':args.limit,'split':split,'trainable_parameters':sum(p.numel() for p in model.parameters() if p.requires_grad),
           'torch':str(torch.__version__),'device':str(args.device),'dtype':'float32','tf32':False, 'checkpoint_train_manifest': state['metadata']['manifest'] if state else None}
+    if args.data_sha256 is not None:
+        meta['data_sha256'] = args.data_sha256
     meta['training_policy'] = training_policy(args, data) if args.mode=='train' else state['metadata'].get('training_policy')
     if args.mode == 'eval':
-        meta['alignment_weight'] = state['metadata'].get('alignment_weight', args.alignment_weight)
+        for key in ('alignment_weight', 'aux_weight', 'pseudo_weight', 'pseudo_warmup'):
+            meta[key] = state['metadata'].get(key, meta[key])
     if cfg.variant == 'F08':
         # Older F08 exports can still be evaluated with their original loss provenance.
         meta['region_to_text_loss_fraction'] = (REGION_ALIGNMENT_DIRECTION_WEIGHT if args.mode == 'train'
@@ -373,6 +474,18 @@ def main():
         report['checkpoint_epoch'] = state.get('epoch')
         report['checkpoint_steps'] = state.get('steps')
         report['checkpoint_kind'] = state.get('checkpoint_kind', 'training_state')
+        report['checkpoint_sha256'] = checkpoint_sha256
+        report['checkpoint_training'] = {
+            key: state['metadata'][key] for key in (
+                'manifest', 'data_sha256', 'weights', 'config', 'seed', 'batch_size', 'lr', 'weight_decay', 'size',
+                'limit', 'training_policy', 'alignment_weight', 'region_to_text_loss_fraction',
+                'aux_weight', 'pseudo_weight', 'pseudo_warmup',
+            ) if key in state['metadata']
+        }
+        report['inference_sizes'] = args.eval_sizes or (args.size,)
+        report['inference_rotations'] = args.eval_rotations
+        report['inference_prompts'] = args.eval_prompts or (PROMPT,)
+        report['native_clip_weight'] = args.native_clip_weight
     # A partial JSON file must never be mistaken for a completed job/cleanup signal.
     report_tmp = args.output/'report.tmp'
     report_tmp.write_text(json.dumps(report,indent=2,allow_nan=False)+'\n',encoding='utf-8')

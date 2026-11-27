@@ -530,7 +530,7 @@ class CombinationCore(nn.Module):
         if cfg.variant == "C6":
             self.selector=CategoryRouter()
 
-    def forward(self, clip, dino, text, scale, grid, output_size, clip_layers=(), dino_layers=(), guides=(), labels=None, ignore=255, force_keep_all=False, status=None, pseudo_enabled=True):
+    def forward(self, clip, dino, text, scale, grid, output_size, clip_layers=(), dino_layers=(), guides=(), labels=None, ignore=255, force_keep_all=False, status=None, pseudo_enabled=True, alignment_enabled=True):
         cfg = self.cfg
         visual = clip if cfg.uses_clip_visual else dino
         if visual is None or visual.shape[1] != grid[0] * grid[1] or text.ndim != 2 or len(text) < 1:
@@ -572,12 +572,13 @@ class CombinationCore(nn.Module):
                 weight = self.fusion(clip,dino,text,aligned,cs,ds,grid)
             seed = seed + weight * (ds_scale * ds - seed)
             if self.training and labels is not None:
-                if cfg.variant == "F09":
+                if cfg.variant == "F09" and alignment_enabled:
                     result["alignment_loss"] = patch_alignment_loss(ds_scale * ds, labels, grid, ignore)
-                else:
+                if cfg.use_rs or (alignment_enabled and cfg.variant != "F09"):
                     regions, ids = pool_regions(dino.detach(), labels, grid, full_k, ignore, cfg.region_mode)
-                    result["alignment_loss"] = region_contrastive(regions, ids, aligned, ds_scale,
-                                                                  reverse_direction=cfg.variant != "F08")
+                    if alignment_enabled:
+                        result["alignment_loss"] = region_contrastive(regions, ids, aligned, ds_scale,
+                                                                      reverse_direction=cfg.variant != "F08")
                     result["regions"], result["region_ids"] = regions, ids
                 if cfg.use_pixel and cfg.pseudo and pseudo_enabled:
                     status=(labels!=ignore).long() if status is None else status
