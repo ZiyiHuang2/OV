@@ -1,6 +1,6 @@
 import unittest
 import torch
-from combination_core import VARIANTS, Config, CombinationCore, segmentation_loss, RelationPropagation, ContextCostFusion, CategoryRouter, pool_regions, patch_alignment_loss, unknown_consistency
+from combination_core import VARIANTS, Config, CombinationCore, segmentation_loss, RelationPropagation, ContextCostFusion, CategoryRouter, pool_regions, patch_alignment_loss, region_contrastive, unknown_consistency
 
 class TestCore(unittest.TestCase):
     def setUp(self):
@@ -74,6 +74,21 @@ class TestCore(unittest.TestCase):
         torch.testing.assert_close(result, -logits[0, 0].log_softmax(0).mean())
         result.backward()
         torch.testing.assert_close(logits.grad[0, 1], torch.zeros(2))
+    def test_one_way_region_alignment_preserves_forward_weight_and_gradient(self):
+        regions = torch.tensor([[2., 1.], [1., 2.], [-1., 1.]])
+        labels = torch.tensor([0, 0, 1])
+        text = torch.tensor([[1., 0.], [1., 1.]], requires_grad=True)
+        scale = 3.
+        scores = scale * (torch.nn.functional.normalize(regions) @ torch.nn.functional.normalize(text).T)
+        forward = torch.nn.functional.cross_entropy(scores, labels)
+        actual = .2 * region_contrastive(regions, labels, text, scale, reverse_direction=False)
+        expected = .1 * forward
+        torch.testing.assert_close(actual, expected)
+        expected_grad, = torch.autograd.grad(expected, text)
+        actual_grad, = torch.autograd.grad(actual, text)
+        torch.testing.assert_close(actual_grad, expected_grad)
+        reverse = (scores.logsumexp(0) - torch.stack((scores[:2, 0].logsumexp(0), scores[2, 1]))).mean()
+        torch.testing.assert_close(region_contrastive(regions, labels, text, scale), (forward + reverse) / 2)
     def test_actual_grid(self):
         torch.manual_seed(2); m=CombinationCore(Config('C4'),15).eval()
         c=torch.randn(1,576,512); d=torch.randn(1,576,768); t=torch.randn(15,512)

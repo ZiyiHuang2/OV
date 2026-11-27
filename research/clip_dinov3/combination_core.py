@@ -14,6 +14,7 @@ from torch.nn import functional as F
 
 VARIANTS = ("C0", "B0", "D0", "C1", "C2", "C3", "C4", "C5", "C6",
             "D01", "D02", "E01", "E02", "F01", "F02", "F08", "F09")
+REGION_ALIGNMENT_DIRECTION_WEIGHT = .5
 
 
 @dataclass(frozen=True)
@@ -215,18 +216,18 @@ class ContextCostFusion(nn.Module):
 
 
 def region_contrastive(regions, ids, text, scale, reverse_direction=True):
-    """Region->class CE + multi-positive class->region NCE; repeated labels aren't negatives."""
+    """Weight each region alignment direction as in the bidirectional objective."""
     if not len(ids):
         return text.sum() * 0
     score = scale * (norm(regions) @ norm(text).T)
     row = F.cross_entropy(score, ids)
     if not reverse_direction:
-        return row
+        return REGION_ALIGNMENT_DIRECTION_WEIGHT * row
     present = ids.unique()
     col = score[:, present]
     positives = ids[:, None] == present[None, :]
     reverse = (col.logsumexp(0) - col.masked_fill(~positives, -torch.inf).logsumexp(0)).mean()
-    return (row + reverse) / 2
+    return REGION_ALIGNMENT_DIRECTION_WEIGHT * (row + reverse)
 
 
 def patch_alignment_loss(logits, labels, grid, ignore):

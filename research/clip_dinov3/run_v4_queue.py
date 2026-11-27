@@ -82,6 +82,8 @@ def dev_result(path, run):
         alignment = 0 if run.control == "noalign" else .2
         if (config["fusion"], config["region_mode"], data["alignment_weight"]) != (fusion, region, alignment):
             raise ValueError(f"Unexpected C2 control: {path}")
+    if run.variant == "F08" and (data.get("region_to_text_loss_fraction"), data["alignment_weight"]) != (.5, .2):
+        raise ValueError(f"Expected matched F08 region-to-text weight: {path}")
     populations = [sum(row) for row in data["confusion_matrix"]]
     scores = [data["class_iou"][name] for name, support in
               zip(data["test_classes"], populations, strict=True) if support]

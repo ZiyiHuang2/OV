@@ -37,10 +37,12 @@ E01 reuses C1's layer projections and learned weights, inspired by [USE §3.2](h
 | D02 | C0 plus a zero-output-initialized 512→384→512 bias-free residual MLP | B0, both with 655,872 trainable parameters |
 | F01 | Add the two separately projected visual embeddings, then normalize and compute cosine scores | F02 |
 | F02 | Normalize the same projected embeddings independently and average their cosine scores | F01 |
-| F08 | C2 with component-to-text CE only | C2's two-direction region objective |
+| F08 | C2 with the component-to-text CE kept at half of the auxiliary weight and the reverse term removed | C2's two-direction region objective |
 | F09 | C2 with patch-to-text soft CE over the histogram of labeled pixels per patch | F08 and C2 |
 
 D01 reads normalized patch tokens through the pinned DINOv3 API and retains the CLIP text tower used by all frozen arms. D02 controls parameter count with one specific head design. F01/F02 use the same two projections, logit scale, segmentation loss and bilinear output. The comparison includes where normalization happens relative to fusion. F08/F09 retain the C2 cost mapper and decoder and change only the auxiliary objective. F09 omits ignored pixels and patches with zero labeled support. The score and region designs draw on [RSKT-Seg](https://arxiv.org/abs/2509.12040) and [OpenSeg](https://arxiv.org/abs/2112.12143) and use this project's iSAID supervision.
+
+At the default auxiliary weight of 0.2, C2 applies 0.1 to each alignment direction and F08 applies 0.1 to component-to-text CE. F08 uses the same component pooling, training data and segmentation loss as C2. Older F08 checkpoints with a full forward weight can be evaluated with their original provenance. Start a fresh run for the matched F08 experiment. D01 keeps the frozen CLIP visual tower resident to use the pinned CLIP text interface. Its CUDA allocation includes that tower even though its image features are unused.
 
 ## Tensor contracts, information responsibilities, and gradient paths
 

@@ -16,7 +16,7 @@ from torch.nn import functional as F
 # Existing entry point sets up the pinned local CLIP and DINO dependencies.
 from run import ManifestSplit, PROMPT
 from combination_model import CSeriesSegmenter
-from combination_core import Config, VARIANTS, segmentation_loss
+from combination_core import Config, REGION_ALIGNMENT_DIRECTION_WEIGHT, VARIANTS, segmentation_loss
 from isaid_protocol import development_epochs
 
 
@@ -119,7 +119,7 @@ def train(args, model, data, meta, state):
     if state:
         if state.get('checkpoint_kind') == 'evaluation_only':
             raise ValueError('Evaluation-only checkpoint: exact training resume requires state.pt')
-        for key in ('weights', 'size', 'prompt', 'manifest', 'train_classes', 'config', 'seed', 'batch_size', 'lr', 'weight_decay', 'ignore_id', 'limit', 'alignment_weight', 'aux_weight', 'pseudo_weight', 'pseudo_warmup', 'schema', 'training_policy'):
+        for key in ('weights', 'size', 'prompt', 'manifest', 'train_classes', 'config', 'seed', 'batch_size', 'lr', 'weight_decay', 'ignore_id', 'limit', 'alignment_weight', 'region_to_text_loss_fraction', 'aux_weight', 'pseudo_weight', 'pseudo_warmup', 'schema', 'training_policy'):
             if state['metadata'].get(key) != meta.get(key):
                 raise ValueError(f'Resume mismatch: {key}')
         if 'progress' not in state:
@@ -358,6 +358,10 @@ def main():
     meta['training_policy'] = training_policy(args, data) if args.mode=='train' else state['metadata'].get('training_policy')
     if args.mode == 'eval':
         meta['alignment_weight'] = state['metadata'].get('alignment_weight', args.alignment_weight)
+    if cfg.variant == 'F08':
+        # Older F08 exports can still be evaluated with their original loss provenance.
+        meta['region_to_text_loss_fraction'] = (REGION_ALIGNMENT_DIRECTION_WEIGHT if args.mode == 'train'
+                                               else state['metadata'].get('region_to_text_loss_fraction', 1.))
     args.output.mkdir(parents=True,exist_ok=True)
     if args.mode=='train':
         if (args.output/'state.pt').exists() and not args.checkpoint: p.error('Refusing to overwrite a prior run; use a new directory or resume')

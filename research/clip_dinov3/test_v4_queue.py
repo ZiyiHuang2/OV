@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from run_v4_queue import EXTRA, FIXED, RESERVE, promotions, run_queue
+from run_v4_queue import EXTRA, FIXED, RESERVE, Run, dev_result, promotions, run_queue
 
 
 def report(path, score, sample_hash="samples", epoch=15):
@@ -82,6 +82,21 @@ class QueueTest(unittest.TestCase):
             selected, decisions = promotions(root, refs, 1, 2)
             self.assertFalse(selected)
             self.assertEqual(next(d for d in decisions if d["ids"] == ("F03",))["state"], "invalid_report")
+
+    def test_f08_promotion_requires_correct_forward_weight(self):
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "F08/dev_epoch_015/report.json"
+            report(path, 12)
+            data = json.loads(path.read_text())
+            data["alignment_weight"] = .2
+            for fraction in (None, 1., .5):
+                data["region_to_text_loss_fraction"] = fraction
+                path.write_text(json.dumps(data))
+                if fraction == .5:
+                    self.assertEqual(dev_result(path, Run("F08", "F08"))[1], 12)
+                else:
+                    with self.assertRaisesRegex(ValueError, "matched F08"):
+                        dev_result(path, Run("F08", "F08"))
 
 
 if __name__ == "__main__":
