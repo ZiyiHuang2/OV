@@ -137,6 +137,8 @@ class HistoryTest(unittest.TestCase):
         self.assertIsNone(audit_split(external))
         write_json(audit, {"manifest_sha256": self.external_hash, "published_split": "DLRSD_split/val"})
         self.assertEqual(audit_split(external), "DLRSD_split/val")
+        write_json(audit, {"val_manifest_sha256": self.external_hash, "split": "OVRSISBench V1 DLRSD_split/val"})
+        self.assertEqual(audit_split(external), "OVRSISBench V1 DLRSD_split/val")
 
     def test_class_errors_preserve_vocabulary_and_ground_truth_orientation(self):
         summary = class_errors({"test_classes": ["Building", "cars", "ship"],

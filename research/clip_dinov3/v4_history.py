@@ -128,8 +128,11 @@ def audit_split(run):
             audit = read_json(audit_path)
         except (OSError, ValueError):
             return None
-        if isinstance(audit, dict) and audit.get("manifest_sha256") == run.manifest_sha256:
-            return audit.get("published_split") or audit.get("original_loveda_split")
+        if isinstance(audit, dict):
+            if audit.get("manifest_sha256") == run.manifest_sha256:
+                return audit.get("published_split") or audit.get("original_loveda_split")
+            if audit.get("val_manifest_sha256") == run.manifest_sha256:
+                return audit.get("split")
     return None
 
 
