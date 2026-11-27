@@ -15,6 +15,8 @@ from torch.nn import functional as F
 VARIANTS = ("C0", "B0", "D0", "C1", "C2", "C3", "C4", "C5", "C6",
             "D01", "D02", "E01", "E02", "F01", "F02", "F08", "F09")
 REGION_ALIGNMENT_DIRECTION_WEIGHT = .5
+MATCHED_FUSION_PROTOCOL = "unit_branch_cosine_v1"
+LEGACY_FUSION_PROTOCOL = "legacy_raw_sum"
 
 
 @dataclass(frozen=True)
@@ -492,9 +494,11 @@ class SharedReconstruction(nn.Module):
 
 
 class CombinationCore(nn.Module):
-    def __init__(self, cfg, train_classes, clip_dim=512, dino_dim=768, clip_width=768, clip_layers=12, dino_layers=4):
+    def __init__(self, cfg, train_classes, clip_dim=512, dino_dim=768, clip_width=768,
+                 clip_layers=12, dino_layers=4, *, legacy_f01=False):
         super().__init__()
         self.cfg = cfg
+        self.legacy_f01 = legacy_f01
         input_dim = dino_dim if not cfg.uses_clip_visual else clip_dim + (dino_dim if cfg.concat_seed else 0)
         self.base = identity_projection(input_dim, clip_dim)
         if cfg.variant == "D02":
@@ -547,7 +551,11 @@ class CombinationCore(nn.Module):
         if cfg.multilayer_residual:
             z = z + self.merge(torch.cat((self.clip_merge(clip_layers), self.dino_merge(dino_layers)), -1))
         if cfg.variant == "F01":
-            z = z + self.dino_projection(dino)
+            projected_dino = self.dino_projection(dino)
+            if self.legacy_f01:
+                z = z + projected_dino
+            else:
+                z = .5 * (norm(z) + norm(projected_dino))
         cs = norm(z) @ text.T
         if cfg.variant == "F02":
             cs = .5 * (cs + norm(self.dino_projection(dino)) @ text.T)
@@ -573,7 +581,9 @@ class CombinationCore(nn.Module):
             seed = seed + weight * (ds_scale * ds - seed)
             if self.training and labels is not None:
                 if cfg.variant == "F09" and alignment_enabled:
-                    result["alignment_loss"] = patch_alignment_loss(ds_scale * ds, labels, grid, ignore)
+                    result["alignment_loss"] = REGION_ALIGNMENT_DIRECTION_WEIGHT * patch_alignment_loss(
+                        ds_scale * ds, labels, grid, ignore
+                    )
                 if cfg.use_rs or (alignment_enabled and cfg.variant != "F09"):
                     regions, ids = pool_regions(dino.detach(), labels, grid, full_k, ignore, cfg.region_mode)
                     if alignment_enabled:

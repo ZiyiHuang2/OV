@@ -1,17 +1,20 @@
 """Resolve and run the matched iSAID experiment queue through the formal launcher."""
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, replace
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import asdict, dataclass
+import errno
 import json
 import math
 import os
 from pathlib import Path
-from queue import Empty, Queue
+import re
+from statistics import median
 import subprocess
 import sys
+from time import monotonic, sleep, time
 
-from isaid_protocol import audit_isaid, file_sha256
+from isaid_protocol import audit_isaid, check_external_source, file_sha256
 from prepare_isaid import CLASSES, SPLIT_SIZES
 
 
@@ -65,6 +68,21 @@ EXTRA = {
     "relations": (Run("C3-e40", "C3", 40), Run("C4-e40", "C4", 40)),
 }
 EXTRA_ANCHORS = {"resolution": ("T01", "T03"), "relations": ("T02", "T04")}
+DIAGNOSTIC_ANCHORS = ("T01", "T03")
+PRIORITY = {"fixed": 0, "promotion": 1, "extra": 2, "reserve": 3, "diagnostic": 4}
+TRANSIENT_ERRNOS = {errno.EAGAIN, errno.EBUSY, errno.EIO, errno.ESTALE, errno.ETIMEDOUT,
+                    errno.ECONNRESET, errno.ENETDOWN}
+TRANSIENT_LOG = re.compile(
+    r"stale file handle|resource temporarily unavailable|input/output error|transport endpoint is not connected"
+    r"|connection (?:reset by peer|timed out)|temporarily unavailable",
+    re.IGNORECASE,
+)
+TERMINAL_LOG = re.compile(
+    r"out of memory|protocol changed|resume mismatch|unexpected .*sha-256|nonfinite (?:loss|evaluation|gradient)",
+    re.IGNORECASE,
+)
+LOG_WINDOW = 32 << 10
+
 
 
 def read_json(path):
@@ -135,6 +153,13 @@ def dev_result(path, run, *, development=True):
     if run.variant == "F08" and (data.get("region_to_text_loss_fraction"), data["alignment_weight"],
                                   training.get("region_to_text_loss_fraction")) != (.5, .2, .5):
         raise ValueError(f"Expected matched F08 region-to-text weight: {path}")
+    if run.variant in ("F01", "F02") and (data.get("fusion_protocol"), training.get("fusion_protocol")) != (
+            "unit_branch_cosine_v1", "unit_branch_cosine_v1"):
+        raise ValueError(f"Expected matched unit-branch fusion protocol: {path}")
+    if run.variant == "F09" and (
+            data.get("patch_to_text_loss_fraction"), data["alignment_weight"],
+            training.get("patch_to_text_loss_fraction")) != (.5, .2, .5):
+        raise ValueError(f"Expected matched F09 patch-to-text weight: {path}")
     matrix = data["confusion_matrix"]
     classes = len(data["test_classes"])
     if (len(matrix) != classes or any(len(row) != classes for row in matrix)
@@ -153,68 +178,15 @@ def dev_result(path, run, *, development=True):
     return identity, subset, training.get("data_sha256"), sum(scores) / len(scores)
 
 
-def promotions(root, reference_root, minimum_delta, limit, requested_ids=None, audit=None):
-    fixed = {run.id: run for run in FIXED}
-    requested = set(requested_ids) if requested_ids is not None else None
-    long_anchor = {"C0": "T00", "B0": "T01", "C2": "T04"}
-    groups = [(("D01",), "B0"), (("D02",), "C0"), (("E01", "E02"), "B0"),
-              (("F01", "F02"), "B0")]
-    groups += [((f"F{i:02d}",), "C2") for i in range(3, 10)]
-    eligible, decisions = [], []
-    for ids, anchor in groups:
-        if requested is not None and not set(ids) <= requested:
-            continue
-        reference = reference_root / anchor / "dev_epoch_015" / "report.json"
-        rows = [root / name / "main" / fixed[name].variant / "dev_epoch_015" / "report.json" for name in ids]
-        decision = {"ids": ids, "anchor": anchor}
-        if not reference.is_file() or not all(row.is_file() for row in rows):
-            decisions.append({**decision, "state": "missing_reports"})
-            continue
-        try:
-            anchor_key, anchor_subset, anchor_data, anchor_score = dev_result(reference, Run(anchor, anchor))
-            results = [dev_result(row, fixed[name]) for name, row in zip(ids, rows, strict=True)]
-        except (OSError, ValueError, KeyError, TypeError, ZeroDivisionError) as exc:
-            decisions.append({**decision, "state": "invalid_report", "reason": str(exc)})
-            continue
-        audited_data = results[0][2]
-        if (not audited_data or (anchor_data is not None and anchor_data != audited_data)
-                or (audit is not None and (anchor_key["manifest"], audited_data)
-                    != (audit["source_manifest_sha256"], audit["data_sha256"]))
-                or any((key, subset, content) != (anchor_key, anchor_subset, audited_data)
-                       for key, subset, content, _ in results)):
-            decisions.append({**decision, "state": "protocol_mismatch"})
-            continue
-        required = [(long_anchor[anchor], anchor)]
-        if ids == ("E01", "E02"):
-            required.append(("T03", "C1"))
-        long_reports = [root / run_id / "main" / variant / "eval" / "report.json"
-                        for run_id, variant in required]
-        if not all(path.is_file() for path in long_reports):
-            decisions.append({**decision, "state": "missing_long_anchor"})
-            continue
-        try:
-            anchors = [dev_result(path, fixed[run_id], development=False)
-                       for path, (run_id, _) in zip(long_reports, required, strict=True)]
-            valid = all(key == anchor_key and content == audited_data for key, _, content, _ in anchors)
-        except (OSError, ValueError, KeyError, TypeError, ZeroDivisionError):
-            valid = False
-        if not valid:
-            decisions.append({**decision, "state": "invalid_long_anchor"})
-            continue
-        delta = max(score for _, _, _, score in results) - anchor_score
-        decision["delta_pp"] = delta
-        if delta >= minimum_delta:
-            eligible.append((delta, ids, decision))
-        else:
-            decisions.append({**decision, "state": "below_threshold"})
-    selected = []
-    for _, ids, decision in sorted(eligible, key=lambda result: -result[0]):
-        if len(selected) + len(ids) > limit:
-            decisions.append({**decision, "state": "budget"})
-            continue
-        selected.extend(replace(fixed[name], id=f"{name}-e40", epochs=40) for name in ids)
-        decisions.append({**decision, "state": "selected"})
-    return selected, decisions
+def promotions(root, reference_root, minimum_delta, limit, requested_ids=None, audit=None, *,
+               external_manifests=(), class_groups=None):
+    from v4_decisions import promotion_candidates, select_promotions
+
+    ranked, decisions = promotion_candidates(
+        root, reference_root, minimum_delta, FIXED, dev_result, requested_ids, audit,
+        external_manifests=external_manifests, class_groups=class_groups,
+    )
+    return select_promotions(ranked, decisions, FIXED, limit)
 
 
 def extra_jobs(runs, args, audit):
@@ -262,6 +234,41 @@ def resolve_gpus(gpus):
     return resolved
 
 
+def read_tail(path, start=0):
+    with path.open("rb") as stream:
+        end = stream.seek(0, os.SEEK_END)
+        stream.seek(max(end - LOG_WINDOW, start, 0))
+        return stream.read().decode("utf-8", errors="replace")
+
+
+def launch_phase(command, env, log_path, stage_path, stage, retries):
+    failures = []
+    for attempt in range(1, retries + 2):
+        current = {**stage, "attempt": attempt, "started_at": time(), "pid": None}
+        write_json(stage_path, current)
+        try:
+            with log_path.open("ab") as log:
+                log.write((f"\n[queue] {stage['phase']} attempt {attempt}\n").encode())
+                log.flush()
+                start = log.tell()
+                with subprocess.Popen(command, cwd=HERE, env=env, stdout=log, stderr=subprocess.STDOUT) as process:
+                    write_json(stage_path, {**current, "pid": process.pid})
+                    returncode = process.wait()
+            if returncode == 0:
+                return True, failures
+            tail = read_tail(log_path, start)
+            retryable = returncode == 75 or bool(TRANSIENT_LOG.search(tail) and not TERMINAL_LOG.search(tail))
+            failure = {"returncode": returncode, "retryable": retryable}
+        except OSError as exc:
+            retryable = exc.errno in TRANSIENT_ERRNOS
+            failure = {"reason": str(exc), "retryable": retryable}
+        failures.append({**stage, "attempt": attempt, **failure})
+        if not retryable or attempt > retries:
+            return False, failures
+        write_json(stage_path, {**current, "phase": "retry_wait", "pid": None, "last_failure": failures[-1]})
+        sleep(min(5 * attempt, 15))
+
+
 def run_job(run, gpu, args):
     out = args.output / run.id
     out.mkdir(exist_ok=True)
@@ -274,55 +281,220 @@ def run_job(run, gpu, args):
            "CSERIES_GPU_IDS": "", "CSERIES_VARIANTS": run.variant,
            "CSERIES_EPOCHS": str(run.epochs), "CSERIES_HELD_SPLIT": run.split,
            "CSERIES_SEED": str(run.seed), "CSERIES_C2_CONTROL": run.control,
-           "CSERIES_SIZE": str(run.size), "CSERIES_UNATTENDED": "1",
+           "CSERIES_SIZE": str(run.size), "CSERIES_UNATTENDED": "1", "CSERIES_TRACK_DEVELOPMENT": "1",
+           "KEEP_FINAL_STATE": "0" if getattr(args, "discard_final_state", False) else "1",
            "CSERIES_DATA_AUDIT": str(args.output / "isaid_data_audit.json")}
     launcher = ["bash", str(HERE / "run_isaid_suite.sh")]
     operands = [str(p) for p in (args.manifest, args.clip_weights, args.dino_weights, out)] + [str(args.batch_size)]
     stages = [("preflight", None), ("main", None)]
     if not run.split:
         stages += [("external", path) for path in args.external_manifest]
-    failures = []
-    with (out / "queue.log").open("a", encoding="utf-8") as log:
-        for phase, external in stages:
-            phase_env = {**env, "EXTERNAL_MANIFEST": str(external or "")}
-            result = subprocess.run([*launcher, phase, *operands], cwd=HERE,
-                                    env=phase_env, stdout=log, stderr=subprocess.STDOUT)
-            if result.returncode:
-                failures.append({"phase": phase, "manifest": str(external) if external else None,
-                                 "returncode": result.returncode})
-                if phase != "external":
-                    break
-    return {"state": "failed", "failures": failures} if failures else {"state": "complete"}
+    attempts, external_failures = [], []
+    for phase, external in stages:
+        phase_env = {**env, "EXTERNAL_MANIFEST": str(external or "")}
+        stage = {"phase": phase, "manifest": str(external) if external else None}
+        success, failures = launch_phase(
+            [*launcher, phase, *operands], phase_env, out / "queue.log", out / "queue_stage.json",
+            stage, args.retries,
+        )
+        attempts.extend(failures)
+        if not success:
+            if phase != "external":
+                return {"state": "failed", "failed_phase": phase, "attempt_failures": attempts}
+            external_failures.append(failures[-1])
+    return {"state": "complete", "attempt_failures": attempts, "external_failures": external_failures}
 
 
-def run_queue(runs, args):
-    pending = Queue()
-    for run in runs:
-        pending.put(run)
+@dataclass(frozen=True)
+class Task:
+    run: Run
+    category: str
 
-    def consume(gpu):
-        results = {}
-        while True:
+    @property
+    def id(self):
+        return f"I-{self.run.id}" if self.category == "diagnostic" else self.run.id
+
+
+def run_task(task, gpu, args):
+    if task.category == "diagnostic":
+        from v4_diagnostics import run_diagnostics
+
+        return run_diagnostics(task.run, gpu, args)
+    return run_job(task.run, gpu, args)
+
+
+def optional_external_manifest_paths(source, paths):
+    accepted, skipped = [], []
+    for path in dict.fromkeys(paths):
+        try:
+            if not path.is_file():
+                raise FileNotFoundError(f"Missing manifest: {path}")
+            check_external_source(source, path)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            skipped.append({"path": str(path), "reason": str(exc)})
+        else:
+            accepted.append(path)
+    return accepted, skipped
+
+
+def task_progress(task, args):
+    if task.category == "diagnostic":
+        return {}
+    out = args.output / task.run.id
+    try:
+        stage = read_json(out / "queue_stage.json")
+    except FileNotFoundError:
+        return {}
+    if stage["phase"] == "main":
+        train_dir = out / "main" / task.run.variant / "train"
+        planned = math.ceil(SPLIT_SIZES["train"] / args.batch_size) * task.run.epochs
+        try:
+            report = read_json(train_dir / "report.json")
+            steps = report["steps"]
+        except FileNotFoundError:
             try:
-                run = pending.get_nowait()
-            except Empty:
-                return results
-            try:
-                status = run_job(run, gpu, args)
-            except (OSError, ValueError) as exc:
-                status = {"state": "failed", "reason": str(exc)}
-            directory = args.output / run.id
-            if directory.is_dir():
-                try:
-                    write_json(directory / "queue_status.json", status)
-                except OSError as exc:
-                    status = {"state": "failed", "reason": f"Cannot write queue status: {exc}",
-                              "job_status": status}
-            results[run.id] = status
-            print(f"{run.id} {status['state']} on {gpu}", flush=True)
+                tail = read_tail(train_dir / "console.log")
+                observed = re.findall(r'(?:^step=|"steps":\s*)(\d+)', tail, re.MULTILINE)
+                steps = max(map(int, observed), default=0)
+            except FileNotFoundError:
+                steps = 0
+        stage.update(steps=steps, planned_steps=planned)
+    return stage
+
+
+def epoch_work(task):
+    return task.run.epochs * (task.run.size / 384) ** 2
+
+
+def live_state(args, ready, active, waiting, results, timings):
+    now = monotonic()
+    lanes, estimates = {}, []
+    rate = median(timings) if timings else None
+    for _, (task, gpu, started) in active.items():
+        elapsed = now - started
+        progress = task_progress(task, args)
+        lanes[gpu] = {"id": task.id, "category": task.category, "elapsed_seconds": round(elapsed, 1), **progress}
+        if rate is not None and task.category != "diagnostic":
+            estimates.append(max(rate * epoch_work(task) - elapsed, 0.))
+    eta = None
+    if rate is not None:
+        queued = sum(epoch_work(task) for task in ready if task.category != "diagnostic") * rate
+        eta = round(max(max(estimates, default=0.), (queued + sum(estimates)) / len(args.gpu)))
+    return {"updated_at_unix": time(), "active_by_gpu": lanes, "ready": [task.id for task in ready],
+            "waiting_on_evidence": waiting,
+            "terminal": {name: status["state"] for name, status in results.items()},
+            "eta_seconds_for_ready_training": eta, "eta_observed_jobs": len(timings),
+            "skipped_external_manifests": getattr(args, "skipped_external_manifests", [])}
+
+
+def resolve_promotions(args, audit):
+    # Freeze the science decision before admitting work, so a restart cannot
+    # choose different groups or spend the budget twice.
+    path = args.output / "promotion_plan.json"
+    protocol = {"source_manifest_sha256": audit["source_manifest_sha256"],
+                "data_sha256": audit["data_sha256"], "reference_root": str(args.reference_root),
+                "threshold_pp": args.promote_min_delta, "limit": args.promotion_limit,
+                "requested_ids": sorted(args.ids or []),
+                "external_manifests": [str(path) for path in args.promotion_external_manifest],
+                "class_groups": args.promotion_class_groups}
+    if path.is_file():
+        plan = read_json(path)
+        if plan["protocol"] != protocol:
+            raise ValueError("Promotion protocol changed; use a new output directory")
+        selected, decisions = [Run(**values) for values in plan["selected"]], plan["decisions"]
+    else:
+        selected, decisions = promotions(
+            args.output, args.reference_root, args.promote_min_delta, args.promotion_limit, args.ids, audit,
+            external_manifests=args.promotion_external_manifest, class_groups=args.promotion_class_groups,
+        )
+        write_json(path, {"protocol": protocol, "selected": [asdict(run) for run in selected],
+                          "decisions": decisions})
+    write_json(args.output / "promotions.json", decisions)
+    return selected
+
+
+def run_queue(runs, args, *, audit=None):
+    from v4_decisions import promotion_dependencies
+
+    ready = [Task(run, "reserve" if run in RESERVE else "fixed") for run in runs
+             if not any(run in pair for pair in EXTRA.values())]
+    extra = {group: [run for run in pair if run in runs]
+             for group, pair in EXTRA.items() if any(run in runs for run in pair)}
+    diagnostics = {run.id: run for run in runs if getattr(args, "diagnostics", False)
+                   and run.id in DIAGNOSTIC_ANCHORS}
+    enabled = {task.id for task in ready}
+    pending_promotion = getattr(args, "promote_min_delta", None) is not None
+    promotion_needs = (promotion_dependencies(getattr(args, "ids", None)) & enabled) if pending_promotion else set()
+    results, active, timings = {}, {}, []
+    all_results = {}
+    for path in sorted(args.output.glob("*/queue_status.json")):
+        try:
+            all_results[path.parent.name] = read_json(path)
+        except (OSError, ValueError) as exc:
+            all_results[path.parent.name] = {"state": "unreadable_status", "reason": str(exc)}
+
+    def finish(task_id, status):
+        try:
+            directory = args.output / task_id
+            directory.mkdir(exist_ok=True)
+            write_json(directory / "queue_status.json", status)
+        except OSError as exc:
+            status = {"state": "failed", "reason": f"Cannot write queue status: {exc}", "job_status": status}
+        results[task_id] = all_results[task_id] = status
+        write_json(args.output / "queue_summary.json", all_results)
 
     with ThreadPoolExecutor(max_workers=len(args.gpu)) as pool:
-        return {k: v for result in pool.map(consume, args.gpu) for k, v in result.items()}
+        while True:
+            if pending_promotion and promotion_needs <= results.keys():
+                ready.extend(Task(run, "promotion") for run in resolve_promotions(args, audit))
+                pending_promotion = False
+            for group, group_runs in list(extra.items()):
+                if (set(EXTRA_ANCHORS[group]) & enabled) <= results.keys():
+                    selected, blocked = extra_jobs(group_runs, args, audit)
+                    ready.extend(Task(run, "extra") for run in selected)
+                    for task_id, status in blocked.items():
+                        finish(task_id, status)
+                    del extra[group]
+            for anchor, run in list(diagnostics.items()):
+                if anchor in results:
+                    task = Task(run, "diagnostic")
+                    if results[anchor]["state"] == "complete":
+                        ready.append(task)
+                    else:
+                        finish(task.id, {"state": "blocked", "anchor": anchor})
+                    del diagnostics[anchor]
+
+            ready.sort(key=lambda task: PRIORITY[task.category])
+            occupied = {gpu for _, gpu, _ in active.values()}
+            for gpu in (gpu for gpu in args.gpu if gpu not in occupied):
+                if not ready:
+                    break
+                task = ready.pop(0)
+                started = monotonic()
+                active[pool.submit(run_task, task, gpu, args)] = task, gpu, started
+            waiting = {run.id: sorted(set(EXTRA_ANCHORS[group]) - results.keys())
+                       for group, group_runs in extra.items() for run in group_runs}
+            waiting.update({f"I-{anchor}": [anchor] for anchor in diagnostics})
+            if pending_promotion:
+                waiting["promotions"] = sorted(promotion_needs - results.keys())
+            write_json(args.output / "queue_live.json", live_state(args, ready, active, waiting, results, timings))
+            if not active:
+                break
+
+            done, _ = wait(active, timeout=15, return_when=FIRST_COMPLETED)
+            for future in done:
+                task, gpu, started = active.pop(future)
+                elapsed = monotonic() - started
+                try:
+                    status = future.result()
+                except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+                    status = {"state": "failed", "reason": str(exc)}
+                status.update(category=task.category, gpu=gpu, wall_seconds=round(elapsed, 2))
+                if status["state"] == "complete" and task.category != "diagnostic" and elapsed >= 60:
+                    timings.append(elapsed / epoch_work(task))
+                finish(task.id, status)
+                print(f"{task.id} {status['state']} on {gpu}", flush=True)
+    return results
 
 
 def main():
@@ -332,14 +504,24 @@ def main():
     parser.add_argument("--external-manifest", action="append", type=lambda p: Path(p).resolve(), default=[])
     parser.add_argument("--gpu", action="append", help="Repeat for each GPU UUID or index")
     parser.add_argument("--batch-size", type=int, default=24)
-    parser.add_argument("--include-reserve", action="store_true")
+    reserve = parser.add_mutually_exclusive_group()
+    reserve.add_argument("--include-reserve", action="store_true", help="Include reserves in a dry run")
+    reserve.add_argument("--no-reserve", action="store_true", help="Exclude reserves from execution")
+    parser.add_argument("--diagnostics", action="store_true", help="Run inference diagnostics after T01/T03")
+    parser.add_argument("--discard-final-state", action="store_true", help="Remove the completed optimizer state")
+    parser.add_argument("--retries", type=int, default=1, help="Extra attempts for transient stage failures, 0–3")
     parser.add_argument("--extra", choices=EXTRA, action="append", default=[])
     parser.add_argument("--ids", nargs="+", help="Restrict to these exact job IDs")
     parser.add_argument("--promote-min-delta", type=float, help="Enable matched 40-epoch follow-ups at this threshold in pp")
     parser.add_argument("--promotion-limit", type=int, default=11)
+    parser.add_argument("--promotion-external-manifest", action="append", type=lambda p: Path(p).resolve(),
+                        default=[], help="A preregistered external development manifest also listed for evaluation")
+    parser.add_argument("--promotion-class-groups", type=Path,
+                        help="JSON object mapping preregistered group names to iSAID class lists")
     parser.add_argument("--execute", action="store_true", help="Start jobs, otherwise print the resolved plan")
     args = parser.parse_args()
-    runs = [*FIXED, *(RESERVE if args.include_reserve else ())]
+    use_reserves = args.include_reserve or (args.execute and not args.no_reserve)
+    runs = [*FIXED, *(RESERVE if use_reserves else ())]
     runs.extend(run for name in dict.fromkeys(args.extra) for run in EXTRA[name])
     if args.ids:
         if len(set(args.ids)) != len(args.ids) or set(args.ids) - {r.id for r in runs}:
@@ -349,15 +531,31 @@ def main():
         if (args.reference_root is None or args.output is None or not math.isfinite(args.promote_min_delta)
                 or args.promote_min_delta <= 0 or not 1 <= args.promotion_limit <= 11):
             parser.error("Promotions require a reference root, output, positive finite threshold and limit 1–11")
+    if set(args.promotion_external_manifest) - set(args.external_manifest):
+        parser.error("Promotion external manifests must also be listed for evaluation")
+    if (args.promotion_external_manifest or args.promotion_class_groups) and args.promote_min_delta is None:
+        parser.error("Promotion evidence requires --promote-min-delta")
+    if args.promotion_class_groups:
+        try:
+            args.promotion_class_groups = read_json(args.promotion_class_groups)
+            if (not isinstance(args.promotion_class_groups, dict)
+                    or any(not name or not isinstance(classes, list) or not classes
+                           or any(not isinstance(c, str) or c not in CLASSES for c in classes)
+                           or len(set(classes)) != len(classes)
+                           for name, classes in args.promotion_class_groups.items())):
+                raise ValueError("Expected unique iSAID class names in nonempty JSON groups")
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
     print(json.dumps([asdict(run) for run in runs], indent=2), flush=True)
     if not args.execute:
         return
     if (not args.output or not args.gpu or any(not gpu or "," in gpu for gpu in args.gpu)
             or len(set(args.gpu)) != len(args.gpu) or args.batch_size < 1):
         parser.error("--execute requires an output, distinct GPUs and a positive batch size")
-    if any(path is None or not path.is_file()
-           for path in (args.manifest, args.clip_weights, args.dino_weights, *args.external_manifest)):
-        parser.error("--execute requires existing data manifests and encoder weights")
+    if not 0 <= args.retries <= 3:
+        parser.error("--retries must range from 0 to 3")
+    if any(path is None or not path.is_file() for path in (args.manifest, args.clip_weights, args.dino_weights)):
+        parser.error("--execute requires an existing source data manifest and encoder weights")
     try:
         args.gpu = resolve_gpus(args.gpu)
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
@@ -368,21 +566,16 @@ def main():
     with (args.output / ".queue.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         audit = audit_isaid(args.manifest, args.output / "isaid_data_audit.json")
-        results = run_queue([run for run in runs if run in FIXED], args)
-        if args.promote_min_delta is not None:
-            selected, decisions = promotions(args.output, args.reference_root,
-                                             args.promote_min_delta, args.promotion_limit, args.ids, audit)
-            write_json(args.output / "promotions.json", decisions)
-            results.update(run_queue(selected, args))
-        selected, blocked = extra_jobs(runs, args, audit)
-        results.update(blocked)
-        results.update(run_queue(selected, args))
-        results.update(run_queue([run for run in runs if run in RESERVE], args))
-        all_results = {path.parent.name: read_json(path)
-                       for path in sorted(args.output.glob("*/queue_status.json"))}
-        all_results.update(results)
-        write_json(args.output / "queue_summary.json", all_results)
-    raise SystemExit(any(status["state"] != "complete" for status in results.values()))
+        args.external_manifest, args.skipped_external_manifests = optional_external_manifest_paths(
+            args.manifest, args.external_manifest)
+        for skipped in args.skipped_external_manifests:
+            print(f"Skipped optional external manifest {skipped['path']}: {skipped['reason']}", flush=True)
+        write_json(args.output / "external_manifest_status.json",
+                   {"accepted": [str(path) for path in args.external_manifest], "skipped": args.skipped_external_manifests})
+        results = run_queue(runs, args, audit=audit)
+    raise SystemExit(any(status["state"] == "failed" and status.get("category") != "diagnostic"
+                         for status in results.values()))
+
 
 
 if __name__ == "__main__":

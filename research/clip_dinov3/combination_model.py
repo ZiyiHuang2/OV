@@ -6,14 +6,14 @@ from combination_core import CombinationCore
 
 
 class CSeriesSegmenter(DualPatchSegmenter):
-    def __init__(self, clip_path, dino_path, size, config, train_classes):
+    def __init__(self, clip_path, dino_path, size, config, train_classes, *, legacy_f01=False):
         if config.uses_dino != (dino_path is not None):
             raise ValueError(f'DINOv3 weight path does not match variant {config.variant}')
         super().__init__(clip_path, dino_path, size)
         if self.dino is not None:
             del self.projection  # original B0 projection is reproduced in the new core
         self.config = config
-        self.core = CombinationCore(config, len(train_classes), CLIP_WIDTH, DINO_WIDTH)
+        self.core = CombinationCore(config, len(train_classes), CLIP_WIDTH, DINO_WIDTH, legacy_f01=legacy_f01)
         self.train_classes = tuple(train_classes)
 
     @torch.no_grad()

@@ -27,6 +27,7 @@ p.add_argument('--batch-size', type=int)
 p.add_argument('--checkpoint', type=Path)
 p.add_argument('--seed', type=int)
 p.add_argument('--eval-loss', action='store_true')
+p.add_argument('--track-development', action='store_true')
 p.add_argument('--fusion')
 p.add_argument('--region-mode')
 p.add_argument('--alignment-weight', type=float)
@@ -34,7 +35,7 @@ a, _ = p.parse_known_args()
 a.output.mkdir(parents=True, exist_ok=True)
 manifest = json.loads(a.manifest.read_text())
 if a.mode == 'train':
-    stages = [e for e in development_epochs(a.epochs) if e < a.epochs]
+    stages = development_epochs(a.epochs, a.track_development)
     if os.environ.get('FAIL_TRAIN_VARIANT') == a.variant:
         (a.output / 'state.pt').write_text('interrupted')
         raise SystemExit(9)
@@ -107,7 +108,7 @@ def verify(launcher):
             result = subprocess.run(["bash", "run_isaid_suite.sh", phase, str(manifest), "clip.pt", "dino.pt", dest, str(batch)],
                                     cwd=root, env={**os.environ, "PYTHON": sys.executable, "CSERIES_EPOCHS": "5",
                                                    "CSERIES_GPU_IDS": "", "KEEP_FINAL_STATE": "0",
-                                                   "CSERIES_VARIANTS": "", "CSERIES_SEED": "42",
+                                                   "CSERIES_VARIANTS": "", "CSERIES_SEED": "42", "CSERIES_TRACK_DEVELOPMENT": "0",
                                                    "CSERIES_HELD_SPLIT": "", "CSERIES_UNATTENDED": "0",
                                                    "CSERIES_SIZE": "384", "CSERIES_C2_CONTROL": "",
                                                    "CSERIES_DATA_AUDIT": str(root / "shared_data_audit.json"), **env},
@@ -188,6 +189,18 @@ def verify(launcher):
                 assert {d.name for d in model.glob("dev_epoch_*")} == {"dev_epoch_005", "dev_epoch_010", "dev_epoch_015"}
         assert "dev_epoch_010" in (run_dir / "summary.csv").read_text()
         assert (run_dir / "C6/keep_all/report.json").is_file()
+        dense_options = {"CSERIES_EPOCHS": "15", "CSERIES_VARIANTS": "C2",
+                         "CSERIES_TRACK_DEVELOPMENT": "1", "KEEP_FINAL_STATE": ""}
+        code, log = run("preflight", dest="dense", **dense_options)
+        assert not code, log
+        code, log = run("main", dest="dense", **dense_options)
+        assert not code, log
+        dense = root / "dense/main/C2"
+        assert {d.name for d in dense.glob("dev_epoch_*")} == {
+            f"dev_epoch_{epoch:03d}" for epoch in (2, 4, 5, 6, 8, 10, 12, 14, 15)}
+        assert (dense / "train/state.pt").is_file()
+        assert (dense / "train/best.pt").is_file()
+        assert "mean_pixel_cross_entropy" in (root / "dense/main/summary.csv").read_text()
         tracked = {"CSERIES_EPOCHS": "40", "CSERIES_VARIANTS": "C0,B0",
                    "CSERIES_SEED": "43", "CSERIES_UNATTENDED": "1"}
         code, log = run("preflight", dest="tracked", **tracked)

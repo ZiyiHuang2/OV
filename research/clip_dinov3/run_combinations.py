@@ -17,7 +17,8 @@ from torch.nn import functional as F
 # Existing entry point sets up the pinned local CLIP and DINO dependencies.
 from run import ManifestSplit, PROMPT
 from combination_model import CSeriesSegmenter
-from combination_core import Config, REGION_ALIGNMENT_DIRECTION_WEIGHT, VARIANTS, segmentation_loss
+from combination_core import (Config, LEGACY_FUSION_PROTOCOL, MATCHED_FUSION_PROTOCOL,
+                              REGION_ALIGNMENT_DIRECTION_WEIGHT, VARIANTS, segmentation_loss)
 from isaid_protocol import development_epochs
 
 
@@ -121,7 +122,7 @@ def train(args, model, data, meta, state):
     if state:
         if state.get('checkpoint_kind') == 'evaluation_only':
             raise ValueError('Evaluation-only checkpoint: exact training resume requires state.pt')
-        for key in ('weights', 'size', 'prompt', 'manifest', 'data_sha256', 'train_classes', 'config', 'seed', 'batch_size', 'lr', 'weight_decay', 'ignore_id', 'limit', 'alignment_weight', 'region_to_text_loss_fraction', 'aux_weight', 'pseudo_weight', 'pseudo_warmup', 'schema', 'training_policy'):
+        for key in ('weights', 'size', 'prompt', 'manifest', 'data_sha256', 'train_classes', 'config', 'seed', 'batch_size', 'lr', 'weight_decay', 'ignore_id', 'limit', 'alignment_weight', 'region_to_text_loss_fraction', 'patch_to_text_loss_fraction', 'fusion_protocol', 'development_epochs', 'aux_weight', 'pseudo_weight', 'pseudo_warmup', 'schema', 'training_policy'):
             if state['metadata'].get(key) != meta.get(key):
                 raise ValueError(f'Resume mismatch: {key}')
         if 'progress' not in state:
@@ -149,7 +150,7 @@ def train(args, model, data, meta, state):
         torch.cuda.reset_peak_memory_stats(device)
     audit = progress['audit']
     frozen = [(p, p._version) for name, p in model.named_parameters() if not name.startswith('core.')]
-    dev_epochs = development_epochs(args.epochs)
+    dev_epochs = development_epochs(args.epochs, getattr(args, 'track_development', False))
     for epoch in range(start_epoch, args.epochs):
         order = data_order(data, args.seed, epoch)
         cursor = start_cursor if epoch == start_epoch else 0
@@ -353,6 +354,7 @@ def main():
     p.add_argument('--limit',type=int); p.add_argument('--seed',type=int,default=42)
     p.add_argument('--epochs',type=int,default=5); p.add_argument('--lr',type=float,default=1e-3)
     p.add_argument('--lr-schedule',choices=('constant','cosine'),default='cosine')
+    p.add_argument('--track-development', action='store_true', help='Export development snapshots every two epochs in addition to historical milestones')
     p.add_argument('--train-warmup-steps',type=int,default=300)
     p.add_argument('--min-lr-ratio',type=float,default=.1); p.add_argument('--grad-clip',type=float,default=1.)
     p.add_argument('--eval-samples',type=int); p.add_argument('--eval-sample-seed',type=int,default=42)
@@ -390,6 +392,8 @@ def main():
     if args.batch_size<1 or args.save_every<1 or args.epochs<1 or args.alignment_weight<0 or args.aux_weight<0 or args.pseudo_weight<0 or args.pseudo_warmup<0: p.error('Invalid training settings')
     if args.lr <= 0 or args.train_warmup_steps < 0 or not 0 <= args.min_lr_ratio <= 1 or args.grad_clip < 0: p.error('Invalid optimizer policy')
     if args.eval_samples is not None and (args.mode!='eval' or args.eval_samples<1 or args.limit is not None): p.error('Use positive --eval-samples only in eval, without --limit')
+    if args.mode != 'train' and args.track_development:
+        p.error('--track-development is training only')
     if args.mode != 'eval' and (args.eval_loss or args.eval_sizes or args.eval_rotations
                                or args.eval_prompts or args.native_clip_weight):
         p.error('Evaluation diagnostics are evaluation only')
@@ -446,7 +450,11 @@ def main():
     split='train' if args.mode=='train' else 'val'; data=StatusSplit(args.manifest,split,args.limit)
     if not len(data) or len(set(data.classes))!=len(data.classes): p.error('Empty split or duplicate classes')
     if train_classes is None: train_classes=data.classes
-    model=CSeriesSegmenter(args.clip_weights.expanduser(),args.dino_weights.expanduser() if args.dino_weights else None,args.size,cfg,train_classes).to(args.device)
+    legacy_f01 = (args.mode == 'eval' and cfg.variant == 'F01'
+                  and state['metadata'].get('fusion_protocol', LEGACY_FUSION_PROTOCOL) == LEGACY_FUSION_PROTOCOL)
+    model = CSeriesSegmenter(args.clip_weights.expanduser(),
+                             args.dino_weights.expanduser() if args.dino_weights else None,
+                             args.size, cfg, train_classes, legacy_f01=legacy_f01).to(args.device)
     meta={'schema':2,'config':asdict(cfg),'weights':model.weight_hashes,'size':args.size,'prompt':PROMPT,
           'manifest':sha256(args.manifest.read_bytes()).hexdigest(),'train_classes':train_classes,
           'ignore_id':data.ignore_id,'seed':args.seed,'batch_size':args.batch_size,'lr':args.lr,
@@ -463,6 +471,17 @@ def main():
         # Older F08 exports can still be evaluated with their original loss provenance.
         meta['region_to_text_loss_fraction'] = (REGION_ALIGNMENT_DIRECTION_WEIGHT if args.mode == 'train'
                                                else state['metadata'].get('region_to_text_loss_fraction', 1.))
+    if cfg.variant == 'F09':
+        meta['patch_to_text_loss_fraction'] = (REGION_ALIGNMENT_DIRECTION_WEIGHT if args.mode == 'train'
+                                              else state['metadata'].get('patch_to_text_loss_fraction', 1.))
+    if cfg.variant in ('F01', 'F02'):
+        protocol = (MATCHED_FUSION_PROTOCOL if args.mode == 'train'
+                    else state['metadata'].get('fusion_protocol', LEGACY_FUSION_PROTOCOL))
+        if protocol not in (MATCHED_FUSION_PROTOCOL, LEGACY_FUSION_PROTOCOL):
+            p.error('Unknown feature fusion protocol')
+        meta['fusion_protocol'] = protocol
+    if args.mode == 'train' and args.track_development:
+        meta['development_epochs'] = list(development_epochs(args.epochs, True))
     args.output.mkdir(parents=True,exist_ok=True)
     if args.mode=='train':
         if (args.output/'state.pt').exists() and not args.checkpoint: p.error('Refusing to overwrite a prior run; use a new directory or resume')
@@ -480,6 +499,7 @@ def main():
                 'manifest', 'data_sha256', 'weights', 'config', 'seed', 'batch_size', 'lr', 'weight_decay', 'size',
                 'limit', 'training_policy', 'alignment_weight', 'region_to_text_loss_fraction',
                 'aux_weight', 'pseudo_weight', 'pseudo_warmup',
+                'fusion_protocol', 'patch_to_text_loss_fraction', 'development_epochs',
             ) if key in state['metadata']
         }
         report['inference_sizes'] = args.eval_sizes or (args.size,)

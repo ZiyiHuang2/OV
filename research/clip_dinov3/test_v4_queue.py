@@ -1,12 +1,16 @@
 import json
+import os
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
+from threading import Event
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from prepare_isaid import CLASSES
-from run_v4_queue import EXTRA, FIXED, RESERVE, Run, dev_result, extra_jobs, promotions, resolve_gpus, run_queue
+from run_v4_queue import (EXTRA, FIXED, RESERVE, Run, dev_result, extra_jobs, launch_phase,
+                          optional_external_manifest_paths, promotions, resolve_gpus, resolve_promotions, run_job, run_queue)
 
 
 def report(path, score, sample_hash="samples", epoch=15, *, legacy=False, batch=24, dino="pinned-dino", lr=.001):
@@ -22,6 +26,10 @@ def report(path, score, sample_hash="samples", epoch=15, *, legacy=False, batch=
     }
     if variant == "C2":
         training["config"].update(fusion="context", region_mode="component")
+    if variant in ("F01", "F02") and not legacy:
+        training["fusion_protocol"] = "unit_branch_cosine_v1"
+    if variant == "F09" and not legacy:
+        training["patch_to_text_loss_fraction"] = .5
     full = path.parent.name == "eval"
     matrix = [[0] * len(CLASSES) for _ in CLASSES]
     matrix[0][:2] = [score, 100 - score]
@@ -172,6 +180,113 @@ class QueueTest(unittest.TestCase):
             self.assertEqual(results[runs[0].id]["state"], "failed")
             self.assertTrue(all(results[run.id]["state"] == "complete" for run in runs[1:]))
             self.assertEqual(len(list(args.output.glob("*/queue_status.json"))), len(runs))
+
+    def test_reserve_fills_free_lane_while_fixed_job_still_runs(self):
+        with TemporaryDirectory() as folder:
+            args = SimpleNamespace(output=Path(folder), gpu=["a", "b"])
+            long, short, reserve = FIXED[0], FIXED[1], RESERVE[0]
+            long_started, reserve_started = Event(), Event()
+
+            def execute(run, gpu, options):
+                if run == long:
+                    long_started.set()
+                    if not reserve_started.wait(4):
+                        raise RuntimeError("reserve was blocked by the fixed-stage barrier")
+                if run == reserve:
+                    if not long_started.wait(4):
+                        raise RuntimeError("did not dispatch the fixed job first")
+                    reserve_started.set()
+                return {"state": "complete"}
+
+            with patch("run_v4_queue.run_job", side_effect=execute):
+                results = run_queue((long, short, reserve), args)
+            self.assertTrue(all(status["state"] == "complete" for status in results.values()))
+            state = json.loads((args.output / "queue_live.json").read_text())
+            self.assertEqual(state["active_by_gpu"], {})
+            self.assertEqual(state["terminal"], {run.id: "complete" for run in (long, short, reserve)})
+            summary = json.loads((args.output / "queue_summary.json").read_text())
+            self.assertEqual(summary[reserve.id]["category"], "reserve")
+
+    def test_optional_diagnostic_depends_only_on_its_anchor(self):
+        with TemporaryDirectory() as folder:
+            args = SimpleNamespace(output=Path(folder), gpu=["a", "b"], diagnostics=True)
+            anchor = next(run for run in FIXED if run.id == "T01")
+            other = FIXED[0]
+            diagnostic_started = Event()
+
+            def execute(task, gpu, options):
+                if task.id == other.id and not diagnostic_started.wait(4):
+                    raise RuntimeError("diagnostic waited on unrelated job")
+                if task.id == "I-T01":
+                    diagnostic_started.set()
+                return {"state": "complete"}
+
+            with patch("run_v4_queue.run_task", side_effect=execute):
+                results = run_queue((anchor, other), args)
+            self.assertEqual(set(results), {"T01", other.id, "I-T01"})
+            self.assertTrue(all(status["state"] == "complete" for status in results.values()))
+
+    def test_transient_attempt_retries_but_deterministic_failure_does_not(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            for reason, expected in (("Stale file handle", 2), ("CUDA out of memory", 1)):
+                with self.subTest(reason=reason):
+                    marker = root / reason
+                    log = root / "log.txt"
+                    program = (
+                        "import sys; from pathlib import Path; marker = Path(sys.argv[1]); "
+                        "known = marker.exists(); marker.touch(); print(sys.argv[2]); "
+                        "raise SystemExit(0 if known else 1)"
+                    )
+                    with patch("run_v4_queue.sleep") as delay:
+                        done, failures = launch_phase(
+                            [sys.executable, "-c", program, str(marker), reason], os.environ,
+                            log, root / "stage.json", {"phase": "main"}, retries=1,
+                        )
+                    self.assertEqual(done, expected == 2)
+                    self.assertEqual(delay.call_count, expected - 1)
+                    self.assertEqual(failures[0]["retryable"], expected == 2)
+                    self.assertEqual(json.loads((root / "stage.json").read_text())["attempt"], expected)
+
+    def test_external_stage_failure_does_not_fail_source_training(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            args = SimpleNamespace(output=root, manifest="manifest", clip_weights="clip", dino_weights="dino",
+                                   batch_size=24, external_manifest=["bad-external", "good-external"], retries=1)
+            with patch("run_v4_queue.launch_phase", side_effect=[
+                (True, []), (True, []), (False, [{"manifest": "bad-external"}]), (True, [])
+            ]) as launch:
+                result = run_job(next(run for run in FIXED if run.id == "T01"), "gpu", args)
+            self.assertEqual(result["state"], "complete")
+            self.assertEqual(result["external_failures"], [{"manifest": "bad-external"}])
+            self.assertEqual(launch.call_count, 4)
+            self.assertEqual(launch.call_args_list[2].args[1]["KEEP_FINAL_STATE"], "1")
+            self.assertEqual(launch.call_args_list[2].args[1]["CSERIES_TRACK_DEVELOPMENT"], "1")
+
+    def test_missing_optional_manifest_is_separate_from_valid_inputs(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            source, valid, missing = (root / name for name in ("source.json", "valid.json", "missing.json"))
+            source.write_text('{"train": [], "val": []}')
+            valid.write_text('{"val": [{"sample_id": "test", "file_name": "im.png", "sem_seg_file_name": "mask.png"}]}')
+            accepted, skipped = optional_external_manifest_paths(source, [valid, missing, valid])
+            self.assertEqual(accepted, [valid])
+            self.assertEqual([entry["path"] for entry in skipped], [str(missing)])
+
+    def test_resolved_promotion_plan_is_replayed(self):
+        with TemporaryDirectory() as folder:
+            args = SimpleNamespace(output=Path(folder), reference_root=Path(folder) / "reference",
+                                   promote_min_delta=1., promotion_limit=2, ids=["F01", "F02"],
+                                   promotion_external_manifest=[], promotion_class_groups=None)
+            audit = {"source_manifest_sha256": "manifest", "data_sha256": "audit"}
+            selected = [Run("F01-e40", "F01", 40), Run("F02-e40", "F02", 40)]
+            with patch("run_v4_queue.promotions", return_value=(selected, [{"state": "selected"}])) as choose:
+                self.assertEqual(resolve_promotions(args, audit), selected)
+                self.assertEqual(resolve_promotions(args, audit), selected)
+            self.assertEqual(choose.call_count, 1)
+            args.promote_min_delta = 2.
+            with self.assertRaisesRegex(ValueError, "Promotion protocol changed"):
+                resolve_promotions(args, audit)
 
     def test_promotion_rejects_mislabeled_c2_control(self):
         with TemporaryDirectory() as folder:

@@ -95,7 +95,7 @@ bash run_isaid_suite.sh main "$manifest" "$clip" "$dino" "$long_output" 24
 
 需要两张卡时，将 `CSERIES_GPU_IDS` 设为逗号分隔的两个 GPU UUID。`CSERIES_UNATTENDED=1` 下，单组失败后该组保留日志与状态文件，同队列后续模型继续。修复故障后用相同命令重新进入，已完成的组复用报告，中断的训练从最近兼容的 `state.pt` 恢复。40 轮使用独立的优化器调度，从原始初始化启动。
 
-40 轮训练结束后，统一评估每两个 epoch 的轻量导出，以及第 15 轮，写入固定 512 图开发集曲线。保留第 15、30、40 轮和开发集最佳导出。默认按开发集 GT 出现类别的 mIoU 选最佳，留类按相同口径的 seen/held 调和均值选最佳，同分保留较早的 checkpoint。最终固定轮数的完整 val 单独报告，像素交叉熵按验证词表和非忽略像素计算。开发子集取自同一个 val，按其选出的最佳权重只用于开发诊断。设置审计后的 `EXTERNAL_MANIFEST` 再用相同配置运行 `external`，可评估长训的第 15、30、40 轮。`KEEP_FINAL_STATE=1` 时保留已完成组的最后恢复状态。
+40 轮训练结束后，统一评估每两个 epoch 的轻量导出，以及第 15 轮，写入固定 512 图开发集曲线。保留第 15、30、40 轮和开发集最佳导出。默认按开发集 GT 出现类别的 mIoU 选最佳，留类按相同口径的 seen/held 调和均值选最佳，同分保留较早的 checkpoint。最终固定轮数的完整 val 单独报告，像素交叉熵按验证词表和非忽略像素计算。开发子集取自同一个 val，按其选出的最佳权重只用于开发诊断。设置审计后的 `EXTERNAL_MANIFEST` 再用相同配置运行 `external`，可评估长训的第 15、30、40 轮。`KEEP_FINAL_STATE=0` 可显式清理已完成任务的恢复状态。默认保留最后一个 `state.pt`，其中包含优化器和 RNG 状态。同一个训练时程内可以精确恢复，40 轮对照用独立的调度从初始权重开始。
 
 补 C1 的两格匹配消融时，设置 `CSERIES_VARIANTS=E01,E02`。E01 使用多层语义残差和双线性上采样，E02 使用末层语义种子和 C1 的引导解码。复用历史 B0/C1 结果时，使用全词表、batch 24、15 轮、seed 42 的同一 iSAID 清单和权重版本。[四格对照与依据](C_SERIES_DESIGN.md#c1-factorial-controls)
 
@@ -107,9 +107,13 @@ python run_v4_queue.py --execute --manifest "$manifest" --clip-weights "$clip" \
   --dino-weights "$dino" --output "$queue_output" --gpu "$gpu_a" --gpu "$gpu_b"
 ```
 
-默认命令打印 33 组固定训练配置。加 `--execute` 后才分配 GPU，每组都有独立前检、训练、日志和状态。可用 `--ids` 精确选择任务，用 `--include-reserve` 加入 12 个后备。重复传入 `--external-manifest` 可在全词表模型的预定节点评估已审计外域。用 `--extra resolution` 或 `--extra relations` 启用分辨率与关系传播附加组，两类附加组各自等待对应的 40 轮完整验证对照。GPU 序号先转换成物理 UUID，防止两种写法指向同一张卡。后备组排在固定组和已满足条件的后续组之后。
+默认命令打印 33 组固定训练配置。加 `--execute` 后分配 GPU，并在固定组之外启用 12 个后备。`--no-reserve` 将后备排除，预览时可用 `--include-reserve` 展开。`--ids` 限定任务。调度器让可执行任务填补空闲 GPU。`--extra resolution` 和 `--extra relations` 各自在匹配的 40 轮对照完成后就绪。GPU 序号先转换成物理 UUID，避免同卡重复占用。
 
-设置 `--promote-min-delta` 和 `--reference-root` 可启用最多 11 组同口径晋级。`reference-root` 指向历史 15 轮实验的 `main` 目录。选组使用同一固定开发集上 GT 支持的类别和预先给定的百分点阈值，并检查对应 40 轮基线已完成。E01/E02 和 F01/F02 分别成对晋级。历史报告需要保留同一分支目录下的训练报告，以核对真实训练 batch、优化器和权重。各晋级组从原始初始化按 40 轮调度训练。决策写入 `promotions.json`。此次实现的可执行计划不包含需要另定版本和匹配协议的 LoRA、视觉骨干替换、编码器内部交互及语义约束进阶臂。
+V4 训练每两轮导出一次开发集快照，另外保留第 5、10、15 轮计划中的评估点。组内训练完成后统一评估固定 512 图并记录交叉熵与 mIoU。默认保留最终 `state.pt`，需要节约存储时可显式传入 `--discard-final-state`。`--retries` 控制已识别瞬时故障的额外尝试次数，默认 1。缺失或无效的可选外域清单记录在 `external_manifest_status.json`，源域继续运行。`queue_live.json` 记录实时 GPU、阶段、步数和已就绪训练的粗略 ETA。尚无吞吐样本或依赖还未就绪的任务不计入 ETA。
+
+`--promote-min-delta` 和 `--reference-root` 启用最多 11 组 40 轮晋级，参考目录指向历史 15 轮实验的 `main`。先核对匹配的 15 轮结果、开发子集、权重及对应的 40 轮基线。F01/F02、E01/E02 和 F08/F09 需要成对具备结果与名额。证据记录直接对照的有符号百分点差异，按绝对值门槛保留值得复核的负结果。`--promotion-class-groups` 传入预先登记的类别分组。`--promotion-external-manifest` 仅登记用于晋级的外域开发集，同时须在 `--external-manifest` 中列出。其他外域结果只用于报告。H1 匹配结果可作为补充依据。名额有限时，达到门槛的外域或留类证据优先于仅有源域差异的组。结果缺失或口径不符的轴均记录原因。重启从 `promotion_plan.json` 复用已确定的分组。
+
+`--diagnostics` 在 T01/B0 和 T03/C1 完成后，为各自终轮权重安排下列 14 个推理对照。区域聚类、额外基线资产和大词表筛选尚未接入这一自动诊断队列。69 组训练上限中仍有 9 个进阶臂需要确定具体权重与匹配协议，涵盖 LoRA、视觉末层微调、骨干替换、编码器内部交互和语义保持。
 
 ## 使用已有权重做推理对照
 

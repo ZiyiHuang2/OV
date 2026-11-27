@@ -68,6 +68,50 @@ class TestCore(unittest.TestCase):
         self.assertEqual(count(early), count(late))
         late.load_state_dict(early.state_dict(), strict=True)
         self.assertFalse(torch.allclose(self.fwd(early)['logits'], self.fwd(late)['logits']))
+    def test_matched_fusion_removes_branch_magnitude_and_keeps_angular_gain(self):
+        early, late = (self.model(v).eval() for v in ('F01', 'F02'))
+        late.load_state_dict(early.state_dict(), strict=True)
+        def normalize(tokens):
+            return torch.nn.functional.normalize(tokens, dim=-1, eps=1e-6)
+
+        def pixels(scores):
+            scores = 20. * scores.transpose(1, 2).reshape(2, 5, *self.grid)
+            return torch.nn.functional.interpolate(scores, (12, 16), mode='bilinear', align_corners=False)
+
+        with torch.no_grad():
+            clip = early.base(self.c)
+            dino = early.dino_projection(self.d)
+            text = normalize(self.t)
+            mean = .5 * (normalize(clip) + normalize(dino))
+            early_logits = self.fwd(early)['logits']
+            late_logits = self.fwd(late)['logits']
+            torch.testing.assert_close(early_logits, pixels(normalize(mean) @ text.T))
+            torch.testing.assert_close(late_logits, pixels(mean @ text.T))
+
+            legacy = CombinationCore(Config('F01'), 5, 8, 12, legacy_f01=True).eval()
+            legacy.load_state_dict(early.state_dict(), strict=True)
+            legacy_logits = self.fwd(legacy)['logits']
+            torch.testing.assert_close(legacy_logits, pixels(normalize(clip + dino) @ text.T))
+            self.assertFalse(torch.allclose(legacy_logits, early_logits))
+            for model, expected in ((early, early_logits), (late, late_logits)):
+                model.dino_projection.weight.mul_(8)
+                model.dino_projection.bias.mul_(8)
+                torch.testing.assert_close(self.fwd(model)['logits'], expected)
+
+    def test_patch_alignment_preserves_matched_weight_and_gradient(self):
+        model = self.model('F09')
+        with patch('combination_core.patch_alignment_loss', wraps=patch_alignment_loss) as alignment:
+            result = self.fwd(model, labels=self.y)
+        self.assertEqual(alignment.call_count, 1)
+        raw = patch_alignment_loss(*alignment.call_args.args)
+        actual = .2 * result['alignment_loss']
+        expected = .1 * raw
+        torch.testing.assert_close(actual, expected)
+        expected_gradient, = torch.autograd.grad(expected, model.text_map[0].weight, retain_graph=True)
+        actual_gradient, = torch.autograd.grad(actual, model.text_map[0].weight)
+        self.assertGreater(actual_gradient.norm().item(), 0)
+        torch.testing.assert_close(actual_gradient, expected_gradient)
+
     def test_patch_supervision_ignores_unlabeled_pixels(self):
         logits = torch.tensor([[[2., 0.], [0., 2.]]], requires_grad=True)
         labels = torch.tensor([[[0, 1, 255, 255]]])

@@ -55,10 +55,14 @@ if [[ -n "${CSERIES_GPU_IDS:-}" ]]; then
   [[ -n "$gpu0" && -n "$gpu1" && "$gpu0" != "$gpu1" && "$gpu1" != *,* ]] ||
     { echo 'CSERIES_GPU_IDS must contain two distinct comma-separated GPU IDs' >&2; exit 2; }
 fi
-# Opt in before main training if exact continuation of completed arms is required.
-keep_final_state=${KEEP_FINAL_STATE:-0}
+# Preserve exact recovery for the resolved horizon unless cleanup is explicitly requested.
+keep_final_state=${KEEP_FINAL_STATE:-1}
 [[ "$keep_final_state" == 0 || "$keep_final_state" == 1 ]] || { echo 'KEEP_FINAL_STATE must be 0 or 1' >&2; exit 2; }
+track_every_two=${CSERIES_TRACK_DEVELOPMENT:-0}
+[[ "$track_every_two" == 0 || "$track_every_two" == 1 ]] ||
+  { echo 'CSERIES_TRACK_DEVELOPMENT must be 0 or 1' >&2; exit 2; }
 train_policy=(--lr 1e-3 --weight-decay .01 --lr-schedule cosine --train-warmup-steps 300 --min-lr-ratio .1 --grad-clip 1 --save-every 500)
+if (( track_every_two )); then train_policy+=(--track-development); fi
 [[ "$batch" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid batch'; exit 2; }
 [[ "$phase" == preflight || "$phase" == main || "$phase" == external ]] || exit 2
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -67,7 +71,7 @@ export CUBLAS_WORKSPACE_CONFIG=:4096:8
 mkdir -p "$out"
 exec 9>"$out/.suite.lock"
 flock -n 9 || { echo "Another suite process owns $out" >&2; exit 2; }
-snapshot_schedule=$("$PYTHON" -c 'import sys; from isaid_protocol import development_epochs; print(*(f"{e:03d}" for e in development_epochs(int(sys.argv[1]))))' "$epochs")
+snapshot_schedule=$("$PYTHON" -c 'import sys; from isaid_protocol import development_epochs; print(*(f"{e:03d}" for e in development_epochs(int(sys.argv[1]), sys.argv[2]=="1")))' "$epochs" "$track_every_two")
 read -r -a dev_epochs <<< "$snapshot_schedule"
 # The queue shares one full decoded data audit across jobs. A standalone
 # invocation keeps its audit alongside its preflight and protocol.
@@ -102,7 +106,7 @@ fi
 common=(--manifest "$manifest" --data-sha256 "$source_data_hash" --clip-weights "$clip" --size "$size" --device cuda --seed "$seed")
 tracked=0
 loss_flags=()
-if [[ "$epochs" == 40 || -n "$held" ]]; then
+if [[ "$epochs" == 40 || -n "$held" || "$track_every_two" == 1 ]]; then
   tracked=1
   loss_flags=(--eval-loss)
 fi
@@ -191,10 +195,10 @@ run_variant() {
       run_job "$dest/keep_all" "$v" "$epochs" eval "${common[@]}" "${weights[@]}" --batch-size 1 --workers 2 --warmup 30 --checkpoint "$dest/train/final.pt" --force-keep-all
     fi
     if (( tracked )); then
-      "$PYTHON" -c 'from isaid_protocol import finish_tracked_run; import sys; finish_tracked_run(*sys.argv[1:])' "$dest" "$epochs" "$held"
+      "$PYTHON" -c 'from isaid_protocol import finish_tracked_run; import sys; finish_tracked_run(*sys.argv[1:4], sys.argv[4]=="1")' "$dest" "$epochs" "$held" "$track_every_two"
     fi
     # All planned local evaluations succeeded: retain final model for external
-    # eval, drop optimizer/RNG state by default. No deletion of shared weights.
+    # eval, drop optimizer/RNG state only if requested. No shared weights are deleted.
     if [[ "$keep_final_state" == 0 ]]; then
       rm -f -- "$dest/train/state.pt"
     fi
@@ -210,7 +214,7 @@ run_variant() {
   fi
 }
 run_lane() {
-  local gpu=$1 v job failed=0
+  local gpu=$1 v job status failed=0
   shift
   if [[ -n "$gpu" ]]; then export CUDA_VISIBLE_DEVICES="$gpu"; fi
   printf 'phase=%s gpu=%s variants=%s\n' "$phase" "${CUDA_VISIBLE_DEVICES:-default}" "$*"
@@ -219,9 +223,12 @@ run_lane() {
     if [[ "$unattended" == 1 ]]; then
       run_variant "$v" &
       job=$!
-      if ! wait "$job"; then
-        echo "Failed: $phase/$v (other selected variants continue)" >&2
-        failed=1
+      if wait "$job"; then
+        continue
+      else
+        status=$?
+        echo "Failed: $phase/$v (exit $status, other selected variants continue)" >&2
+        if (( ! failed )); then failed=$status; fi
       fi
     else
       run_variant "$v"

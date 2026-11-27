@@ -14,10 +14,12 @@ HELD_CLASSES = {
 }
 
 
-def development_epochs(epochs):
+def development_epochs(epochs, track_every_two=False):
     if epochs == 40:
         return tuple(sorted({15, *range(2, epochs, 2)}))
-    return (5, 10) if epochs == 15 else (1, 3)
+    milestones = (5, 10) if epochs == 15 else (1, 3)
+    even = range(2, epochs, 2) if track_every_two else ()
+    return tuple(sorted({epoch for epoch in (*milestones, *even) if epoch < epochs}))
 
 
 def read_json(path):
@@ -204,10 +206,10 @@ def held_identity(source, path, split, source_data_hash=None):
     return sha256(path.read_bytes() + bytes.fromhex(masks_hash)).hexdigest()
 
 
-def finish_tracked_run(dest, epochs, held):
+def finish_tracked_run(dest, epochs, held, track_every_two=False):
     dest, epochs = Path(dest), int(epochs)
     train = dest / 'train'
-    points = (*development_epochs(epochs), epochs)
+    points = (*development_epochs(epochs, track_every_two), epochs)
     candidates = []
     sample_hash = None
     for epoch in points:
